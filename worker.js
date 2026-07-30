@@ -187,6 +187,9 @@ export default {
         if (path === '/api/admin/whitelist' && method === 'DELETE') {
           return await handleDeleteWhitelist(request, env);
         }
+        if (path === '/api/admin/reset-db' && method === 'POST') {
+          return await handleResetDb(request, env);
+        }
         if (path === '/api/admin/devices' && method === 'GET') {
           return await handleGetDevices(request, env);
         }
@@ -724,6 +727,28 @@ async function handleBatchWhitelist(request, env) {
   } catch (e) {
     return json({ error: '批量导入失败: ' + e.message, success: ok, failed: fail, errors: errors.slice(0, 50) }, 500, env);
   }
+}
+
+// 危险操作:重置数据库(清空打卡/设备/会话数据,保留白名单)
+// 入参: { confirm: 'YES_RESET' }  防止误触发
+async function handleResetDb(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (body.confirm !== 'YES_RESET') {
+    return json({ error: '请确认重置操作(confirm 参数必须为 YES_RESET)' }, 400, env);
+  }
+  const drops = [
+    'DROP TABLE IF EXISTS checkins',
+    'DROP TABLE IF EXISTS device_binds',
+    'DROP TABLE IF EXISTS nonces',
+    'DROP TABLE IF EXISTS admin_sessions',
+    'DROP TABLE IF EXISTS audit_logs',
+  ];
+  for (const sql of drops) {
+    await env.DB.exec(sql).catch(() => {});
+  }
+  await initDb(env);
+  await audit(env, 'db_reset', '管理员重置数据库:清空打卡/设备/会话数据,保留白名单', null, getClientIp(request));
+  return json({ ok: true, message: '数据库已重置。打卡记录、设备绑定、nonce、管理员会话已清空,白名单(nfc_tags/users/dept_positions)已保留。当前管理员会话已失效,请重新登录。' }, 200, env);
 }
 
 // 白名单删除

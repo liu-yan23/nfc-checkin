@@ -135,6 +135,15 @@ tr:hover{background:#f9fafb;}
                         <tbody id="devicesBody"></tbody>
                     </table>
                 </div>
+                <div style="margin-top:24px;padding:14px;border:1px solid #fecaca;border-radius:8px;background:#fef2f2;">
+                    <div style="font-weight:600;color:#b91c1c;margin-bottom:6px;">⚠ 危险操作区</div>
+                    <div style="font-size:12px;color:#7f1d1d;line-height:1.6;margin-bottom:10px;">
+                        <strong>重置数据库</strong>:清空所有打卡记录、设备绑定、nonce、管理员会话,保留白名单(NFC标签/学生/科室位置)。<br>
+                        适用场景:从旧版本升级后,需要清除旧的 UNIQUE 约束和测试数据。<br>
+                        执行后当前管理员会话会失效,需要重新登录。
+                    </div>
+                    <button class="danger" id="resetDbBtn" style="background:#dc2626;color:#fff;border:none;">🗑 重置数据库(清空打卡/设备数据)</button>
+                </div>
             </div>
 
             <!-- 白名单管理 -->
@@ -358,6 +367,23 @@ async function loadRecords() {
 }
 
 document.getElementById("searchBtn").addEventListener("click", loadRecords);
+
+// ---------- 重置数据库(危险操作) ----------
+document.getElementById("resetDbBtn").addEventListener("click", async () => {
+    const step1 = confirm("⚠ 危险操作\n\n即将清空:\n• 所有打卡记录\n• 所有设备绑定\n• 所有 nonce\n• 所有管理员会话(含当前登录)\n\n保留:\n• NFC 标签白名单\n• 学生白名单\n• 科室位置\n\n确定继续吗?");
+    if (!step1) return;
+    const step2 = confirm("二次确认:\n\n执行后当前管理员会立即登出,需要重新登录。\n此操作不可恢复!\n\n真的要重置吗?");
+    if (!step2) return;
+    const step3 = prompt("请输入 YES 确认重置(区分大小写):");
+    if (step3 !== "YES") { alert("未输入 YES,已取消。"); return; }
+    const { ok, data } = await api("/api/admin/reset-db", {
+        method: "POST", body: { confirm: "YES_RESET" }
+    });
+    if (!ok) return alert(data.error || "重置失败");
+    alert(data.message + "\n\n即将跳转到登录页...");
+    localStorage.removeItem("adminToken");
+    location.href = "admin.html";
+});
 
 // ---------- 导出 Excel ----------
 document.getElementById("exportBtn").addEventListener("click", async () => {
