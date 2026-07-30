@@ -57,7 +57,7 @@ export async function onRequest(context) {
     if (path === '/api/records/mine' && method === 'GET') return handleMyRecords(req, env);
 
     // 管理员权限
-    if (path.startsWith('/api/admin') || path === '/api/audit') {
+    if (path.startsWith('/api/admin') || path === '/api/audit' || path === '/api/records/all') {
       var token = req.headers.get('X-Admin-Token');
       if (!token) return json({ error: '未授权' }, 401);
       var sess = await env.DB.prepare('SELECT expires_at FROM admin_sessions WHERE token = ?').bind(token).first();
