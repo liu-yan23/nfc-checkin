@@ -129,7 +129,7 @@ tr:hover{background:#f9fafb;}
                 <div class="table-wrap">
                     <table>
                         <thead><tr>
-                            <th>设备 ID</th><th>绑定 NFC UID</th><th>工号</th>
+                            <th>设备 ID</th><th>绑定工号</th><th>最近扫的 NFC</th>
                             <th>绑定时间</th><th>最近活跃</th><th>操作</th>
                         </tr></thead>
                         <tbody id="devicesBody"></tbody>
@@ -165,6 +165,19 @@ tr:hover{background:#f9fafb;}
                             <input type="text" id="newUserName" placeholder="如 张三">
                         </div>
                         <button id="addUserBtn">添加/更新</button>
+                        <div style="border-top:1px dashed #e5e7eb;margin-top:12px;padding-top:10px;">
+                            <div style="font-size:12px;color:#6b7280;margin-bottom:8px;font-weight:500;">批量操作</div>
+                            <div class="btn-row">
+                                <button class="outline" id="userTemplateBtn">📥 下载模板</button>
+                                <button class="outline" id="userImportBtn">📤 导入 Excel</button>
+                                <button class="outline danger" id="userReplaceBtn" style="color:#dc2626;border-color:#fecaca;">⚠ 覆盖导入</button>
+                            </div>
+                            <input type="file" id="userFileInput" accept=".xlsx,.xls" style="display:none;">
+                            <div style="font-size:11px;color:#9ca3af;margin-top:6px;line-height:1.5;">
+                                模板格式: 第1行表头「工号,姓名」,从第2行开始填数据。<br>
+                                「导入 Excel」= 追加/更新;「覆盖导入」= 清空后重新写入。
+                            </div>
+                        </div>
                     </div>
                     <div class="box" style="margin:0;">
                         <div class="title-left" style="font-weight:600;margin-bottom:10px;">📍 科室位置</div>
@@ -393,10 +406,13 @@ async function loadDevices() {
     body.innerHTML = "";
     devices.forEach(d => {
         const tr = document.createElement("tr");
+        const userCodeCell = d.user_code
+            ? `<strong>${esc(d.user_code)}</strong>`
+            : `<span style="color:#9ca3af;">未绑定(首次打卡时绑定)</span>`;
         tr.innerHTML = `
             <td title="${esc(d.device_id)}">${esc(d.device_id).slice(0, 16)}...</td>
-            <td>${esc(d.tag_uid)}</td>
-            <td>${esc(d.user_code || '-')}</td>
+            <td>${userCodeCell}</td>
+            <td>${esc(d.tag_uid || '-')}</td>
             <td>${formatTime(d.bound_at)}</td>
             <td>${formatTime(d.last_seen_at)}</td>
             <td><button class="danger" onclick="unbindDevice('${esc(d.device_id)}')">解绑</button></td>
@@ -405,7 +421,7 @@ async function loadDevices() {
     });
 }
 window.unbindDevice = async function (deviceId) {
-    if (!confirm("确认解绑此设备？解绑后该设备可重新绑定其他 NFC 卡号。")) return;
+    if (!confirm("确认解绑此设备？解绑后该设备可重新绑定新的工号。")) return;
     const { ok, data } = await api("/api/admin/unbind", { method: "POST", body: { deviceId } });
     if (!ok) return alert(data.error || "解绑失败");
     alert("解绑成功");
@@ -539,6 +555,105 @@ async function loadAudit() {
     });
 }
 document.getElementById("refreshAuditBtn").addEventListener("click", loadAudit);
+
+// ---------- 批量导入白名单 ----------
+function downloadTemplate(type) {
+    let data, filename;
+    if (type === 'user') {
+        data = [{ '工号': '001', '姓名': '张三' }, { '工号': '002', '姓名': '李四' }];
+        filename = '学生白名单模板.xlsx';
+    } else if (type === 'dept') {
+        data = [{ '科室名': '急诊', '纬度': 29.362, '经度': 106.2929, '半径米': 15 }];
+        filename = '科室位置模板.xlsx';
+    } else if (type === 'nfc') {
+        data = [{ 'NFC_UID': '538B1CCE330001', '科室': '急诊' }];
+        filename = 'NFC标签模板.xlsx';
+    } else return;
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '模板');
+    const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([buf], { type: 'application/octet-stream' });
+    saveAs(blob, filename);
+}
+
+function readExcel(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const data = new Uint8Array(e.target.result);
+                const wb = XLSX.read(data, { type: 'array' });
+                const ws = wb.Sheets[wb.SheetNames[0]];
+                const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+                resolve(rows);
+            } catch (err) { reject(err); }
+        };
+        reader.onerror = () => reject(new Error('文件读取失败'));
+        reader.readAsArrayBuffer(file);
+    });
+}
+
+async function importBatch(file, type, mode) {
+    try {
+        const rows = await readExcel(file);
+        if (!rows.length) return alert('Excel 中没有数据');
+        let items;
+        if (type === 'user') {
+            items = rows.map(r => ({
+                userCode: String(r['工号'] ?? r['userCode'] ?? r['user_code'] ?? '').trim(),
+                name: String(r['姓名'] ?? r['name'] ?? '').trim(),
+            }));
+        } else if (type === 'dept') {
+            items = rows.map(r => ({
+                dept: String(r['科室名'] ?? r['dept'] ?? '').trim(),
+                lat: parseFloat(r['纬度'] ?? r['lat']),
+                lng: parseFloat(r['经度'] ?? r['lng']),
+                radius: parseInt(r['半径米'] ?? r['radius']) || 15,
+            }));
+        } else if (type === 'nfc') {
+            items = rows.map(r => ({
+                uid: String(r['NFC_UID'] ?? r['uid'] ?? '').trim(),
+                dept: String(r['科室'] ?? r['dept'] ?? '').trim(),
+            }));
+        } else return;
+        // 过滤全空行
+        items = items.filter(it => Object.values(it).some(v => v !== '' && v != null && !Number.isNaN(v)));
+        if (!items.length) return alert('没有有效数据行');
+        const { ok, data: resp } = await api('/api/admin/whitelist/batch', {
+            method: 'POST', body: { type, items, mode }
+        });
+        if (!ok) return alert(resp.error || '导入失败');
+        let msg = `导入完成：成功 ${resp.success} 条，失败 ${resp.failed} 条`;
+        if (resp.errors && resp.errors.length) {
+            msg += '\n\n失败明细（最多 50 条）：\n' + resp.errors.join('\n');
+        }
+        alert(msg);
+        loadWhitelist();
+    } catch (e) {
+        alert('解析或导入失败：' + e.message);
+    }
+}
+
+document.getElementById('userTemplateBtn').addEventListener('click', () => downloadTemplate('user'));
+document.getElementById('userImportBtn').addEventListener('click', () => {
+    const input = document.getElementById('userFileInput');
+    input.dataset.mode = 'upsert';
+    input.click();
+});
+document.getElementById('userReplaceBtn').addEventListener('click', () => {
+    if (!confirm('覆盖导入将清空当前所有学生数据，然后从 Excel 重新写入。\n确定继续吗？')) return;
+    const input = document.getElementById('userFileInput');
+    input.dataset.mode = 'replace';
+    input.click();
+});
+document.getElementById('userFileInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const mode = e.target.dataset.mode || 'upsert';
+    importBatch(file, 'user', mode);
+    e.target.value = '';
+});
 
 // ---------- 工具函数 ----------
 function formatTime(ts) {

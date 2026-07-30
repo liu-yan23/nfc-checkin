@@ -152,11 +152,7 @@ async function bootstrap() {
         });
         const data = await resp.json();
         if (!resp.ok) {
-            if (data.error === "DEVICE_BIND_CONFLICT") {
-                showError(data.message, "该设备已绑定其他卡号");
-            } else {
-                showError(data.error || "NFC 校验失败");
-            }
+            showError(data.error || "NFC 校验失败");
             return;
         }
         nonce = data.nonce;
@@ -167,6 +163,22 @@ async function bootstrap() {
         document.getElementById("deptName").value = data.dept;
         // 显示打卡类型（用服务器时间，避免客户端改时间作弊）
         document.getElementById("checkType").textContent = getCheckType(serverTime);
+
+        // 若设备已绑定工号,预填并锁定输入框(一台手机只能给一个工号打卡)
+        const userCodeInput = document.getElementById("userCode");
+        if (data.boundUserCode) {
+            userCodeInput.value = data.boundUserCode;
+            userCodeInput.readOnly = true;
+            userCodeInput.style.backgroundColor = "#f3f4f6";
+            userCodeInput.style.color = "#6b7280";
+            userCodeInput.placeholder = "";
+            // 在输入框下方加一行提示
+            const hint = document.createElement("div");
+            hint.style.cssText = "font-size:12px;color:#6b7280;margin-top:4px;";
+            hint.textContent = "本设备已绑定该工号,如需更换请联系管理员解绑";
+            userCodeInput.parentElement.appendChild(hint);
+            tryEnableSubmit();
+        }
 
         // 获取定位
         await getPosition();
@@ -281,6 +293,8 @@ document.getElementById("submitBtn").addEventListener("click", async () => {
             tryEnableSubmit();
             if (data.error === "今日已打卡") {
                 alert("今日已打卡，无法重复打卡。\n上次打卡类型：" + data.lastCheckType);
+            } else if (data.error === "DEVICE_USER_CONFLICT") {
+                alert(data.message || "该设备已绑定其他工号，无法打卡");
             } else {
                 alert(data.error || "打卡失败");
             }

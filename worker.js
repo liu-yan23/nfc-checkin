@@ -170,6 +170,9 @@ export default {
         if (path === '/api/admin/whitelist' && method === 'POST') {
           return await handleUpsertWhitelist(request, env);
         }
+        if (path === '/api/admin/whitelist/batch' && method === 'POST') {
+          return await handleBatchWhitelist(request, env);
+        }
         if (path === '/api/admin/whitelist' && method === 'DELETE') {
           return await handleDeleteWhitelist(request, env);
         }
@@ -330,24 +333,13 @@ async function handleCheckinInit(request, env) {
     return json({ error: 'NFC 标签未注册，访问拒绝' }, 403, env);
   }
 
-  // 设备绑定校验：每台设备只能给 1 个卡号打卡
+  // 设备绑定说明:
+  //   - NFC 贴片是科室共用,任何设备都可以扫任意贴片,不在此处限制
+  //   - 设备↔工号 的绑定限制在 handleCheckinSubmit 中检查(首次提交工号时绑定)
+  //   - 此处仅记录/更新设备最近访问的 tag_uid 与 last_seen_at
   const bind = await env.DB.prepare(
     'SELECT tag_uid, user_code FROM device_binds WHERE device_id = ?'
   ).bind(deviceId).first();
-
-  if (bind && bind.tag_uid !== uid) {
-    // 设备绑定了别的卡号 → 触发"换卡"事件
-    // 策略 B：清空该设备此前绑定的"未提交"打卡缓存（前端 localStorage 由前端清）
-    // 后端记录该设备原始绑定的卡号（不动数据库里的历史打卡记录）
-    await audit(env, 'device_switch_blocked',
-      `设备 ${deviceId} 已绑定 ${bind.tag_uid}，尝试访问 ${uid}`,
-      deviceId, getClientIp(request));
-    return json({
-      error: 'DEVICE_BIND_CONFLICT',
-      message: `该设备已绑定其他卡号（${bind.tag_uid}），无法为 ${uid} 打卡。请联系管理员解绑后重试。`,
-      boundUid: bind.tag_uid,
-    }, 409, env);
-  }
 
   // 生成 nonce（5 分钟有效）
   const nonce = randomToken(24);
@@ -357,22 +349,23 @@ async function handleCheckinInit(request, env) {
     'INSERT INTO nonces (nonce, tag_uid, device_id, created_at, expires_at, used) VALUES (?, ?, ?, ?, ?, 0)'
   ).bind(nonce, uid, deviceId, now, expires).run();
 
-  // 记录/更新设备绑定（首次访问即绑定 tag_uid，user_code 在提交时再绑）
   if (!bind) {
     await env.DB.prepare(
       'INSERT INTO device_binds (device_id, tag_uid, user_code, bound_at, last_seen_at) VALUES (?, ?, NULL, ?, ?)'
     ).bind(deviceId, uid, now, now).run();
   } else {
     await env.DB.prepare(
-      'UPDATE device_binds SET last_seen_at = ? WHERE device_id = ?'
-    ).bind(now, deviceId).run();
+      'UPDATE device_binds SET tag_uid = ?, last_seen_at = ? WHERE device_id = ?'
+    ).bind(uid, now, deviceId).run();
   }
 
+  // 若设备已绑定工号,返回给前端用于预填(只读)
   return json({
     nonce,
     nonceExpiresAt: expires,
     dept: tag.dept,
     serverTime: now,
+    boundUserCode: bind ? bind.user_code : null,
   }, 200, env);
 }
 
@@ -408,9 +401,20 @@ async function handleCheckinSubmit(request, env) {
   const bind = await env.DB.prepare(
     'SELECT tag_uid, user_code FROM device_binds WHERE device_id = ?'
   ).bind(deviceId).first();
-  if (!bind || bind.tag_uid !== uid) {
-    await audit(env, 'device_mismatch', `设备 ${deviceId} 与 UID ${uid} 不匹配`, deviceId, ip);
+  if (!bind) {
+    await audit(env, 'device_mismatch', `设备 ${deviceId} 未绑定`, deviceId, ip);
     return json({ error: '设备绑定异常，请重新触碰 NFC 标签' }, 403, env);
+  }
+  // 设备↔工号绑定校验:一台手机只能给一个工号打卡(首次提交时绑定,之后不可更改)
+  if (bind.user_code && bind.user_code !== userCode) {
+    await audit(env, 'device_user_conflict',
+      `设备 ${deviceId} 已绑定工号 ${bind.user_code}，本次提交工号 ${userCode}`,
+      deviceId, ip);
+    return json({
+      error: 'DEVICE_USER_CONFLICT',
+      message: `该设备已绑定工号 ${bind.user_code}，无法为 ${userCode} 打卡。请联系管理员解绑后重试。`,
+      boundUserCode: bind.user_code,
+    }, 409, env);
   }
 
   // 3) 工号白名单校验
@@ -620,6 +624,79 @@ async function handleUpsertWhitelist(request, env) {
   }
   await audit(env, 'whitelist_upsert', `${type}: ${JSON.stringify(data)}`, null, getClientIp(request));
   return json({ ok: true }, 200, env);
+}
+
+// 批量导入白名单(支持 user / dept / nfc 三类)
+// 入参: { type: 'user'|'dept'|'nfc', items: [...] , mode: 'upsert'|'replace'}
+//   - mode='upsert'(默认): 仅插入/更新,不动现有数据
+//   - mode='replace': 先清空该类型数据,再批量插入(谨慎使用)
+async function handleBatchWhitelist(request, env) {
+  const body = await request.json();
+  const now = Date.now();
+  if (!body.type || !Array.isArray(body.items)) {
+    return json({ error: '参数缺失或 items 不是数组' }, 400, env);
+  }
+  const { type, items } = body;
+  const mode = body.mode === 'replace' ? 'replace' : 'upsert';
+  if (items.length === 0) return json({ error: 'items 为空' }, 400, env);
+  if (items.length > 2000) return json({ error: '单次最多 2000 条' }, 400, env);
+
+  let ok = 0, fail = 0;
+  const errors = [];
+  try {
+    if (type === 'user') {
+      if (mode === 'replace') await env.DB.prepare('DELETE FROM users').run();
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        const code = it.userCode != null ? String(it.userCode).trim() : (it.user_code != null ? String(it.user_code).trim() : '');
+        const name = it.name != null ? String(it.name).trim() : '';
+        if (!code || !name) { fail++; errors.push(`第 ${i + 1} 行: 工号或姓名为空`); continue; }
+        try {
+          await env.DB.prepare(
+            'INSERT INTO users (user_code, name, created_at) VALUES (?, ?, ?) ' +
+            'ON CONFLICT(user_code) DO UPDATE SET name = excluded.name'
+          ).bind(code, name, now).run();
+          ok++;
+        } catch (e) { fail++; errors.push(`第 ${i + 1} 行: ${e.message}`); }
+      }
+    } else if (type === 'dept') {
+      if (mode === 'replace') await env.DB.prepare('DELETE FROM dept_positions').run();
+      for (let j = 0; j < items.length; j++) {
+        const d = items[j];
+        const dname = d.dept != null ? String(d.dept).trim() : '';
+        const lat = parseFloat(d.lat), lng = parseFloat(d.lng), radius = parseInt(d.radius) || 15;
+        if (!dname || isNaN(lat) || isNaN(lng)) { fail++; errors.push(`第 ${j + 1} 行: 科室名/经纬度无效`); continue; }
+        try {
+          await env.DB.prepare(
+            'INSERT INTO dept_positions (dept, lat, lng, radius) VALUES (?, ?, ?, ?) ' +
+            'ON CONFLICT(dept) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, radius = excluded.radius'
+          ).bind(dname, lat, lng, radius).run();
+          ok++;
+        } catch (e) { fail++; errors.push(`第 ${j + 1} 行: ${e.message}`); }
+      }
+    } else if (type === 'nfc') {
+      if (mode === 'replace') await env.DB.prepare('DELETE FROM nfc_tags').run();
+      for (let k = 0; k < items.length; k++) {
+        const t = items[k];
+        const uid = t.uid != null ? String(t.uid).toLowerCase().trim() : '';
+        const dept = t.dept != null ? String(t.dept).trim() : '';
+        if (!uid || !dept) { fail++; errors.push(`第 ${k + 1} 行: UID 或科室为空`); continue; }
+        try {
+          await env.DB.prepare(
+            'INSERT INTO nfc_tags (uid, dept, created_at) VALUES (?, ?, ?) ' +
+            'ON CONFLICT(uid) DO UPDATE SET dept = excluded.dept'
+          ).bind(uid, dept, now).run();
+          ok++;
+        } catch (e) { fail++; errors.push(`第 ${k + 1} 行: ${e.message}`); }
+      }
+    } else {
+      return json({ error: '未知类型,应为 user / dept / nfc' }, 400, env);
+    }
+    await audit(env, 'whitelist_batch', `${type} mode=${mode} ok=${ok} fail=${fail}`, null, getClientIp(request));
+    return json({ ok: true, type, mode, success: ok, failed: fail, errors: errors.slice(0, 50) }, 200, env);
+  } catch (e) {
+    return json({ error: '批量导入失败: ' + e.message, success: ok, failed: fail, errors: errors.slice(0, 50) }, 500, env);
+  }
 }
 
 // 白名单删除
