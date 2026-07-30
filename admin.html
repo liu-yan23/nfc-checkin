@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>管理员后台</title>
+<!-- xlsx + FileSaver 用于导出 Excel
+     部署后建议用 https://www.srihash.org/ 生成真实 integrity 值并加 integrity 属性 -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js" crossorigin="anonymous"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,-apple-system,sans-serif;}
+body{background:#f5f7fa;color:#1f2937;}
+.wrap{max-width:1100px;margin:0 auto;padding:18px;}
+.box{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:18px;margin-bottom:14px;}
+.title{font-size:17px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;}
+.title-left{display:flex;align-items:center;gap:8px;}
+.tabs{display:flex;gap:6px;border-bottom:1px solid #e5e7eb;margin-bottom:14px;flex-wrap:wrap;}
+.tab{padding:10px 16px;cursor:pointer;border-bottom:2px solid transparent;color:#6b7280;font-size:14px;font-weight:500;}
+.tab.active{color:#2563eb;border-bottom-color:#2563eb;}
+.tab:hover{color:#2563eb;}
+.row{margin:10px 0;}
+label{display:block;margin-bottom:5px;font-size:13px;color:#374151;font-weight:500;}
+input,select{width:100%;padding:9px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;}
+input:focus,select:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.1);}
+button{padding:9px 16px;border:none;border-radius:6px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer;font-weight:500;transition:background .15s;}
+button:hover{background:#1d4ed8;}
+button.danger{background:#dc2626;}
+button.danger:hover{background:#b91c1c;}
+button.outline{background:#fff;color:#374151;border:1px solid #d1d5db;}
+button.outline:hover{background:#f9fafb;}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap;}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th,td{padding:8px 6px;text-align:left;border-bottom:1px solid #f3f4f6;}
+th{background:#f9fafb;color:#374151;font-weight:600;position:sticky;top:0;}
+tr:hover{background:#f9fafb;}
+.table-wrap{max-height:480px;overflow:auto;border:1px solid #f3f4f6;border-radius:6px;}
+.filter-bar{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-bottom:12px;}
+.filter-bar > div{flex:1;min-width:130px;}
+.tag{display:inline-block;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:500;}
+.tag-normal{background:#d1fae5;color:#065f46;}
+.tag-late{background:#fef3c7;color:#92400e;}
+.tag-abnormal{background:#fee2e2;color:#991b1b;}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:14px;}
+.stat-card{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:10px 12px;}
+.stat-num{font-size:22px;font-weight:700;color:#111827;}
+.stat-label{font-size:12px;color:#6b7280;margin-top:2px;}
+.login-box{max-width:340px;margin:80px auto;padding:30px;background:#fff;border:1px solid #e5e7eb;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,.06);}
+.login-title{text-align:center;font-size:18px;font-weight:600;margin-bottom:18px;}
+.err-msg{color:#dc2626;font-size:13px;margin-top:8px;text-align:center;min-height:18px;}
+.list{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;}
+.list-item{background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:10px 12px;}
+.list-item-meta{font-size:12px;color:#6b7280;margin-top:4px;}
+.empty{text-align:center;padding:30px;color:#9ca3af;font-size:14px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+    <!-- ========== 登录页 ========== -->
+    <div id="loginPage" class="login-box">
+        <div class="login-title">🔐 管理员登录</div>
+        <div class="row">
+            <input type="password" id="pwdInput" placeholder="请输入管理员口令">
+        </div>
+        <button id="loginBtn" style="width:100%;">登录</button>
+        <div id="loginErr" class="err-msg"></div>
+    </div>
+
+    <!-- ========== 后台主页 ========== -->
+    <div id="adminPage" style="display:none;">
+        <div class="box">
+            <div class="title">
+                <div class="title-left">🛠 管理员后台</div>
+                <button class="outline" id="logoutBtn">退出登录</button>
+            </div>
+            <div class="tabs">
+                <div class="tab active" data-tab="records">📊 打卡汇总</div>
+                <div class="tab" data-tab="devices">📱 设备管理</div>
+                <div class="tab" data-tab="whitelist">👥 白名单管理</div>
+                <div class="tab" data-tab="audit">📜 审计日志</div>
+            </div>
+
+            <!-- 打卡汇总 -->
+            <div id="tab-records" class="tab-content">
+                <div class="filter-bar">
+                    <div>
+                        <label>开始日期</label>
+                        <input type="date" id="startDate">
+                    </div>
+                    <div>
+                        <label>结束日期</label>
+                        <input type="date" id="endDate">
+                    </div>
+                    <div>
+                        <label>科室</label>
+                        <select id="filterDept"><option value="">全部</option></select>
+                    </div>
+                    <div>
+                        <label>工号</label>
+                        <input type="text" id="filterUserCode" placeholder="工号">
+                    </div>
+                    <div style="flex:0;">
+                        <label>&nbsp;</label>
+                        <button id="searchBtn">查询</button>
+                    </div>
+                    <div style="flex:0;">
+                        <label>&nbsp;</label>
+                        <button class="outline" id="exportBtn">📥 导出 Excel</button>
+                    </div>
+                </div>
+                <div class="stats" id="stats"></div>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr>
+                            <th>时间</th><th>姓名</th><th>工号</th><th>科室</th>
+                            <th>类型</th><th>距离</th><th>状态</th><th>设备</th>
+                        </tr></thead>
+                        <tbody id="recordsBody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 设备管理 -->
+            <div id="tab-devices" class="tab-content" style="display:none;">
+                <div class="btn-row" style="margin-bottom:10px;">
+                    <button class="outline" id="refreshDevicesBtn">刷新</button>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr>
+                            <th>设备 ID</th><th>绑定 NFC UID</th><th>工号</th>
+                            <th>绑定时间</th><th>最近活跃</th><th>操作</th>
+                        </tr></thead>
+                        <tbody id="devicesBody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 白名单管理 -->
+            <div id="tab-whitelist" class="tab-content" style="display:none;">
+                <div class="list">
+                    <div class="box" style="margin:0;">
+                        <div class="title-left" style="font-weight:600;margin-bottom:10px;">🏷 NFC 标签</div>
+                        <div id="nfcList"></div>
+                        <div class="row" style="margin-top:10px;">
+                            <label>UID</label>
+                            <input type="text" id="newNfcUid" placeholder="如 538B1CCE330001">
+                        </div>
+                        <div class="row">
+                            <label>科室</label>
+                            <input type="text" id="newNfcDept" placeholder="如 急诊">
+                        </div>
+                        <button id="addNfcBtn">添加/更新</button>
+                    </div>
+                    <div class="box" style="margin:0;">
+                        <div class="title-left" style="font-weight:600;margin-bottom:10px;">👨‍⚕️ 学生</div>
+                        <div id="userList"></div>
+                        <div class="row" style="margin-top:10px;">
+                            <label>工号</label>
+                            <input type="text" id="newUserCode" placeholder="如 001">
+                        </div>
+                        <div class="row">
+                            <label>姓名</label>
+                            <input type="text" id="newUserName" placeholder="如 张三">
+                        </div>
+                        <button id="addUserBtn">添加/更新</button>
+                    </div>
+                    <div class="box" style="margin:0;">
+                        <div class="title-left" style="font-weight:600;margin-bottom:10px;">📍 科室位置</div>
+                        <div id="deptList"></div>
+                        <div class="row" style="margin-top:10px;">
+                            <label>科室名</label>
+                            <input type="text" id="newDeptName" placeholder="如 急诊">
+                        </div>
+                        <div class="row">
+                            <label>纬度 lat</label>
+                            <input type="number" id="newDeptLat" step="0.0001" placeholder="29.362">
+                        </div>
+                        <div class="row">
+                            <label>经度 lng</label>
+                            <input type="number" id="newDeptLng" step="0.0001" placeholder="106.2929">
+                        </div>
+                        <div class="row">
+                            <label>半径（米）</label>
+                            <input type="number" id="newDeptRadius" placeholder="15">
+                        </div>
+                        <button id="addDeptBtn">添加/更新</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 审计日志 -->
+            <div id="tab-audit" class="tab-content" style="display:none;">
+                <div class="btn-row" style="margin-bottom:10px;">
+                    <button class="outline" id="refreshAuditBtn">刷新</button>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr>
+                            <th>时间</th><th>事件</th><th>详情</th><th>设备</th><th>IP</th>
+                        </tr></thead>
+                        <tbody id="auditBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// =====================【部署配置】=====================
+const API_BASE = "https://nfc-checkin.1120678174.workers.dev";
+// =======================================================
+
+let adminToken = sessionStorage.getItem("admin_token") || null;
+
+// ---------- 登录 ----------
+document.getElementById("loginBtn").addEventListener("click", async () => {
+    const pwd = document.getElementById("pwdInput").value;
+    if (!pwd) return;
+    const errEl = document.getElementById("loginErr");
+    errEl.textContent = "";
+    try {
+        const resp = await fetch(API_BASE + "/api/admin/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password: pwd }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { errEl.textContent = data.error || "登录失败"; return; }
+        adminToken = data.token;
+        sessionStorage.setItem("admin_token", adminToken);
+        enterAdmin();
+    } catch (e) {
+        errEl.textContent = "网络错误：" + e.message;
+    }
+});
+document.getElementById("pwdInput").addEventListener("keypress", e => {
+    if (e.key === "Enter") document.getElementById("loginBtn").click();
+});
+
+document.getElementById("logoutBtn").addEventListener("click", () => {
+    adminToken = null;
+    sessionStorage.removeItem("admin_token");
+    location.reload();
+});
+
+// ---------- 进入后台 ----------
+function enterAdmin() {
+    document.getElementById("loginPage").style.display = "none";
+    document.getElementById("adminPage").style.display = "block";
+    loadRecords();
+    loadWhitelist();
+}
+
+if (adminToken) enterAdmin();
+
+// ---------- Tab 切换 ----------
+document.querySelectorAll(".tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+        tab.classList.add("active");
+        document.querySelectorAll(".tab-content").forEach(c => c.style.display = "none");
+        document.getElementById("tab-" + tab.dataset.tab).style.display = "block";
+        if (tab.dataset.tab === "devices") loadDevices();
+        if (tab.dataset.tab === "audit") loadAudit();
+    });
+});
+
+// ---------- 通用请求 ----------
+async function api(path, options = {}) {
+    const headers = { "X-Admin-Token": adminToken, ...(options.headers || {}) };
+    if (options.body && typeof options.body === "object") {
+        headers["Content-Type"] = "application/json";
+        options.body = JSON.stringify(options.body);
+    }
+    const resp = await fetch(API_BASE + path, { ...options, headers });
+    const data = await resp.json();
+    if (resp.status === 401) {
+        alert("登录已过期，请重新登录");
+        sessionStorage.removeItem("admin_token");
+        location.reload();
+        throw new Error("unauthorized");
+    }
+    return { ok: resp.ok, status: resp.status, data };
+}
+
+// ---------- 打卡汇总 ----------
+async function loadRecords() {
+    const startDate = document.getElementById("startDate").value;
+    const endDate = document.getElementById("endDate").value;
+    const dept = document.getElementById("filterDept").value;
+    const userCode = document.getElementById("filterUserCode").value.trim();
+    const params = new URLSearchParams();
+    if (startDate) params.set("startDate", startDate);
+    if (endDate) params.set("endDate", endDate);
+    if (dept) params.set("dept", dept);
+    if (userCode) params.set("userCode", userCode);
+    const { ok, data } = await api("/api/records/all?" + params.toString());
+    if (!ok) return alert(data.error || "查询失败");
+    const records = data.records || [];
+
+    // 统计
+    const stats = { total: records.length, normal: 0, abnormal: 0, uniqueUsers: new Set() };
+    records.forEach(r => {
+        if (r.status === "normal") stats.normal++; else stats.abnormal++;
+        stats.uniqueUsers.add(r.user_code);
+    });
+    document.getElementById("stats").innerHTML = `
+        <div class="stat-card"><div class="stat-num">${stats.total}</div><div class="stat-label">总打卡数</div></div>
+        <div class="stat-card"><div class="stat-num">${stats.normal}</div><div class="stat-label">正常</div></div>
+        <div class="stat-card"><div class="stat-num">${stats.abnormal}</div><div class="stat-label">异常</div></div>
+        <div class="stat-card"><div class="stat-num">${stats.uniqueUsers.size}</div><div class="stat-label">涉及学生数</div></div>
+    `;
+
+    // 表格
+    const body = document.getElementById("recordsBody");
+    if (records.length === 0) {
+        body.innerHTML = '<tr><td colspan="8" class="empty">暂无打卡记录</td></tr>';
+        return;
+    }
+    body.innerHTML = "";
+    records.forEach(r => {
+        const tr = document.createElement("tr");
+        const cells = [
+            formatTime(r.check_time),
+            esc(r.user_name),
+            esc(r.user_code),
+            esc(r.dept),
+            esc(r.check_type),
+            (r.distance || 0).toFixed(1) + "m",
+            `<span class="tag ${r.status === 'normal' ? 'tag-normal' : 'tag-abnormal'}">${r.status === 'normal' ? '正常' : '异常'}</span>`,
+            esc(r.device_id).slice(0, 8) + "...",
+        ];
+        cells.forEach(c => {
+            const td = document.createElement("td");
+            td.innerHTML = c;
+            tr.appendChild(td);
+        });
+        body.appendChild(tr);
+    });
+}
+
+document.getElementById("searchBtn").addEventListener("click", loadRecords);
+
+// ---------- 导出 Excel ----------
+document.getElementById("exportBtn").addEventListener("click", async () => {
+    const startDate = document.getElementById("startDate").value;
+    const endDate = document.getElementById("endDate").value;
+    const dept = document.getElementById("filterDept").value;
+    const userCode = document.getElementById("filterUserCode").value.trim();
+    const params = new URLSearchParams();
+    if (startDate) params.set("startDate", startDate);
+    if (endDate) params.set("endDate", endDate);
+    if (dept) params.set("dept", dept);
+    if (userCode) params.set("userCode", userCode);
+    const { ok, data } = await api("/api/records/all?" + params.toString());
+    if (!ok) return alert(data.error || "导出失败");
+    const records = (data.records || []).map(r => ({
+        打卡时间: formatTime(r.check_time),
+        姓名: r.user_name,
+        工号: r.user_code,
+        科室: r.dept,
+        打卡类型: r.check_type,
+        状态: r.status === "normal" ? "正常" : "异常",
+        距离米: (r.distance || 0).toFixed(1),
+        纬度: r.lat,
+        经度: r.lng,
+        设备ID: r.device_id,
+        IP: r.ip || "",
+    }));
+    if (records.length === 0) return alert("无数据可导出");
+    const ws = XLSX.utils.json_to_sheet(records);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "打卡记录");
+    const buf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    const blob = new Blob([buf], { type: "application/octet-stream" });
+    saveAs(blob, `打卡数据_${startDate || '全部'}_${endDate || '全部'}.xlsx`);
+});
+
+// ---------- 设备管理 ----------
+async function loadDevices() {
+    const { ok, data } = await api("/api/admin/devices");
+    if (!ok) return alert(data.error || "加载失败");
+    const devices = data.devices || [];
+    const body = document.getElementById("devicesBody");
+    if (devices.length === 0) {
+        body.innerHTML = '<tr><td colspan="6" class="empty">暂无设备绑定</td></tr>';
+        return;
+    }
+    body.innerHTML = "";
+    devices.forEach(d => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+            <td title="${esc(d.device_id)}">${esc(d.device_id).slice(0, 16)}...</td>
+            <td>${esc(d.tag_uid)}</td>
+            <td>${esc(d.user_code || '-')}</td>
+            <td>${formatTime(d.bound_at)}</td>
+            <td>${formatTime(d.last_seen_at)}</td>
+            <td><button class="danger" onclick="unbindDevice('${esc(d.device_id)}')">解绑</button></td>
+        `;
+        body.appendChild(tr);
+    });
+}
+window.unbindDevice = async function (deviceId) {
+    if (!confirm("确认解绑此设备？解绑后该设备可重新绑定其他 NFC 卡号。")) return;
+    const { ok, data } = await api("/api/admin/unbind", { method: "POST", body: { deviceId } });
+    if (!ok) return alert(data.error || "解绑失败");
+    alert("解绑成功");
+    loadDevices();
+};
+document.getElementById("refreshDevicesBtn").addEventListener("click", loadDevices);
+
+// ---------- 白名单管理 ----------
+async function loadWhitelist() {
+    const { ok, data } = await api("/api/admin/whitelist");
+    if (!ok) return alert(data.error || "加载失败");
+    // 渲染列表
+    const nfcEl = document.getElementById("nfcList");
+    const nfcTags = data.nfcTags || [];
+    if (nfcTags.length === 0) nfcEl.innerHTML = '<div class="empty">暂无 NFC 标签</div>';
+    else {
+        nfcEl.innerHTML = "";
+        nfcTags.forEach(t => {
+            const item = document.createElement("div");
+            item.className = "list-item";
+            item.innerHTML = `<div><strong>${esc(t.uid)}</strong> → ${esc(t.dept)}</div>
+                <div class="list-item-meta">添加于 ${formatTime(t.created_at)}</div>
+                <button class="danger" style="margin-top:6px;padding:4px 10px;font-size:12px;" onclick="deleteWhitelist('nfc','${esc(t.uid)}')">删除</button>`;
+            nfcEl.appendChild(item);
+        });
+    }
+    // 学生
+    const userEl = document.getElementById("userList");
+    const users = data.users || [];
+    if (users.length === 0) userEl.innerHTML = '<div class="empty">暂无学生</div>';
+    else {
+        userEl.innerHTML = "";
+        users.forEach(u => {
+            const item = document.createElement("div");
+            item.className = "list-item";
+            item.innerHTML = `<div><strong>${esc(u.user_code)}</strong> ${esc(u.name)}</div>
+                <button class="danger" style="margin-top:6px;padding:4px 10px;font-size:12px;" onclick="deleteWhitelist('user','${esc(u.user_code)}')">删除</button>`;
+            userEl.appendChild(item);
+        });
+    }
+    // 科室
+    const deptEl = document.getElementById("deptList");
+    const depts = data.depts || [];
+    // 同时更新筛选下拉
+    const filterDept = document.getElementById("filterDept");
+    filterDept.innerHTML = '<option value="">全部</option>';
+    depts.forEach(d => {
+        const opt = document.createElement("option");
+        opt.value = d.dept; opt.textContent = d.dept;
+        filterDept.appendChild(opt);
+    });
+    if (depts.length === 0) deptEl.innerHTML = '<div class="empty">暂无科室配置</div>';
+    else {
+        deptEl.innerHTML = "";
+        depts.forEach(d => {
+            const item = document.createElement("div");
+            item.className = "list-item";
+            item.innerHTML = `<div><strong>${esc(d.dept)}</strong> (${d.radius}m)</div>
+                <div class="list-item-meta">${d.lat}, ${d.lng}</div>
+                <button class="danger" style="margin-top:6px;padding:4px 10px;font-size:12px;" onclick="deleteWhitelist('dept','${esc(d.dept)}')">删除</button>`;
+            deptEl.appendChild(item);
+        });
+    }
+}
+window.deleteWhitelist = async function (type, key) {
+    if (!confirm(`确认删除 ${type}：${key}？`)) return;
+    const { ok, data } = await api("/api/admin/whitelist", { method: "DELETE", body: { type, key } });
+    if (!ok) return alert(data.error || "删除失败");
+    loadWhitelist();
+};
+
+document.getElementById("addNfcBtn").addEventListener("click", async () => {
+    const uid = document.getElementById("newNfcUid").value.trim();
+    const dept = document.getElementById("newNfcDept").value.trim();
+    if (!uid || !dept) return alert("请填写完整");
+    const { ok, data } = await api("/api/admin/whitelist", {
+        method: "POST", body: { type: "nfc", uid, dept }
+    });
+    if (!ok) return alert(data.error || "添加失败");
+    document.getElementById("newNfcUid").value = "";
+    document.getElementById("newNfcDept").value = "";
+    loadWhitelist();
+});
+document.getElementById("addUserBtn").addEventListener("click", async () => {
+    const userCode = document.getElementById("newUserCode").value.trim();
+    const name = document.getElementById("newUserName").value.trim();
+    if (!userCode || !name) return alert("请填写完整");
+    const { ok, data } = await api("/api/admin/whitelist", {
+        method: "POST", body: { type: "user", userCode, name }
+    });
+    if (!ok) return alert(data.error || "添加失败");
+    document.getElementById("newUserCode").value = "";
+    document.getElementById("newUserName").value = "";
+    loadWhitelist();
+});
+document.getElementById("addDeptBtn").addEventListener("click", async () => {
+    const dept = document.getElementById("newDeptName").value.trim();
+    const lat = parseFloat(document.getElementById("newDeptLat").value);
+    const lng = parseFloat(document.getElementById("newDeptLng").value);
+    const radius = parseInt(document.getElementById("newDeptRadius").value) || 15;
+    if (!dept || isNaN(lat) || isNaN(lng)) return alert("请填写完整");
+    const { ok, data } = await api("/api/admin/whitelist", {
+        method: "POST", body: { type: "dept", dept, lat, lng, radius }
+    });
+    if (!ok) return alert(data.error || "添加失败");
+    ["newDeptName","newDeptLat","newDeptLng","newDeptRadius"].forEach(id => document.getElementById(id).value = "");
+    loadWhitelist();
+});
+
+// ---------- 审计日志 ----------
+async function loadAudit() {
+    const { ok, data } = await api("/api/audit?limit=200");
+    if (!ok) return alert(data.error || "加载失败");
+    const logs = data.logs || [];
+    const body = document.getElementById("auditBody");
+    if (logs.length === 0) {
+        body.innerHTML = '<tr><td colspan="5" class="empty">暂无日志</td></tr>';
+        return;
+    }
+    body.innerHTML = "";
+    logs.forEach(l => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+            <td>${formatTime(l.created_at)}</td>
+            <td>${esc(l.event)}</td>
+            <td>${esc(l.detail || '')}</td>
+            <td>${l.device_id ? esc(l.device_id).slice(0, 8) + '...' : '-'}</td>
+            <td>${esc(l.ip || '-')}</td>
+        `;
+        body.appendChild(tr);
+    });
+}
+document.getElementById("refreshAuditBtn").addEventListener("click", loadAudit);
+
+// ---------- 工具函数 ----------
+function formatTime(ts) {
+    if (!ts) return "-";
+    const d = new Date(ts + 8 * 3600 * 1000);
+    const pad = n => String(n).padStart(2, "0");
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+}
+// HTML 转义防 XSS
+function esc(s) {
+    if (s == null) return "";
+    return String(s).replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+}
+</script>
+</body>
+</html>

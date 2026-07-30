@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- 禁缓存：防止通过浏览器返回或保存的快照再次打卡 -->
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>科室轮转打卡</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,-apple-system,sans-serif;}
+body{background:#f5f7fa;color:#1f2937;}
+.wrap{max-width:480px;margin:0 auto;padding:16px;min-height:100vh;}
+.box{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:18px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.04);}
+.title{font-size:17px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px;}
+.err-box{background:#fef2f2;border:1px solid #fecaca;padding:32px 18px;text-align:center;border-radius:12px;color:#b91c1c;}
+.err-box .icon{font-size:42px;margin-bottom:10px;}
+.main-box{display:none;}
+.row{margin:12px 0;}
+label{display:block;margin-bottom:6px;font-size:14px;color:#374151;font-weight:500;}
+input{width:100%;padding:11px;border:1px solid #d1d5db;border-radius:8px;font-size:15px;}
+input:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.1);}
+input[readonly]{background:#f3f4f6;color:#6b7280;}
+button{padding:13px 0;width:100%;border:none;border-radius:8px;background:#2563eb;color:#fff;font-size:16px;margin-top:10px;cursor:pointer;font-weight:500;transition:background .15s;}
+button:hover:not(:disabled){background:#1d4ed8;}
+button:disabled{background:#9ca3af;cursor:not-allowed;}
+.pos-ok{color:#059669;font-size:14px;font-weight:500;}
+.pos-err{color:#dc2626;font-size:14px;font-weight:500;}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:500;}
+.tag-normal{background:#d1fae5;color:#065f46;}
+.tag-abnormal{background:#fee2e2;color:#991b1b;}
+.subtitle{font-size:13px;color:#6b7280;margin-top:2px;}
+.record-list{max-height:260px;overflow-y:auto;border:1px solid #f3f4f6;border-radius:8px;}
+.record-item{padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:13px;line-height:1.5;}
+.record-item:last-child{border-bottom:none;}
+.logo{cursor:default;user-select:none;font-size:13px;color:#9ca3af;text-align:center;padding:14px 0;}
+.loading{display:inline-block;width:14px;height:14px;border:2px solid #d1d5db;border-top-color:#2563eb;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.banner{background:#fef3c7;border:1px solid #fde68a;color:#92400e;padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:14px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+    <div id="errBox" class="err-box" style="display:none;">
+        <div class="icon">⛔</div>
+        <div style="font-size:18px;font-weight:600;">访问拒绝</div>
+        <div id="errMsg" style="margin-top:8px;font-size:14px;">必须触碰科室NFC标签进入系统，禁止手动输入链接或收藏访问。</div>
+        <div id="errSub" style="margin-top:4px;font-size:13px;color:#7f1d1d;"></div>
+    </div>
+
+    <div id="mainBox" class="main-box">
+        <div class="box">
+            <div class="title">📋 打卡</div>
+            <div class="row">
+                <label>本人工号</label>
+                <input type="text" id="userCode" placeholder="填写白名单内工号" autocomplete="off">
+            </div>
+            <div class="row">
+                <label>当前打卡科室</label>
+                <input type="text" id="deptName" readonly>
+            </div>
+            <div class="row">
+                <label>打卡定位校验</label>
+                <div id="posText"><span class="loading"></span>正在获取定位...</div>
+            </div>
+            <div class="row">
+                <label>打卡类型（服务器时间判定）</label>
+                <div><span id="checkType">--</span></div>
+            </div>
+            <button id="submitBtn" disabled>提交打卡</button>
+        </div>
+
+        <div class="box">
+            <div class="title">📅 我的最近打卡</div>
+            <div id="recordList" class="record-list"><div class="record-item" style="color:#9ca3af;">暂无打卡记录</div></div>
+        </div>
+
+        <!-- 右下角隐藏入口：长按 LOGO 5 秒跳转管理员页 -->
+        <div id="logo" class="logo">© NFC Check-in · v2.0</div>
+    </div>
+</div>
+
+<script>
+// =====================【部署配置区】=====================
+// 修改为你的 Cloudflare Worker 域名
+// 例如：https://nfc-checkin.your-account.workers.dev
+// 或自定义域名：https://checkin-api.yourdomain.com
+const API_BASE = "https://nfc-checkin.1120678174.workers.dev";
+
+// 学生完成页路径（打卡成功后跳转，与当前页同目录）
+const DONE_PAGE = "done.html";
+// 管理员后台页路径
+const ADMIN_PAGE = "admin.html";
+// =======================================================
+
+// ---------- 1. URL 参数校验 ----------
+const urlObj = new URL(window.location.href);
+const tagUid = urlObj.searchParams.get("tagUid");
+
+if (!tagUid) {
+    document.getElementById("errBox").style.display = "block";
+    document.getElementById("errMsg").textContent =
+        "链接缺少 NFC 标签参数，请用手机触碰科室 NFC 标签进入。";
+} else {
+    // mainBox 先显示，但 submitBtn 保持 disabled 直到所有校验通过
+    document.getElementById("mainBox").style.display = "block";
+    bootstrap();
+}
+
+// ---------- 2. 设备指纹生成（前端生成 deviceId，绑定关系后端记录）----------
+async function getDeviceId() {
+    let did = localStorage.getItem("nfc_device_id");
+    if (did) return did;
+    // 简易指纹：UA + 屏幕 + 时区 + canvas，hash 后生成
+    const raw = [
+        navigator.userAgent,
+        screen.width + "x" + screen.height,
+        Intl.DateTimeFormat().resolvedOptions().timeZone,
+        getCanvasFingerprint(),
+    ].join("|");
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+    did = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+    localStorage.setItem("nfc_device_id", did);
+    return did;
+}
+function getCanvasFingerprint() {
+    try {
+        const c = document.createElement("canvas");
+        const ctx = c.getContext("2d");
+        ctx.textBaseline = "top";
+        ctx.font = "14px Arial";
+        ctx.fillText("NFC-Checkin-DeviceID-" + navigator.language, 2, 2);
+        return c.toDataURL();
+    } catch (e) { return "no-canvas"; }
+}
+
+// ---------- 3. 全局状态 ----------
+let nonce = null;
+let nonceExpiresAt = 0;
+let nowLat = null, nowLng = null;
+let deviceId = null;
+let posOk = false;
+let serverTime = 0;
+
+// ---------- 4. 主流程：init -> 拿 nonce ----------
+async function bootstrap() {
+    try {
+        deviceId = await getDeviceId();
+        const resp = await fetch(API_BASE + "/api/checkin/init", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tagUid, deviceId }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            if (data.error === "DEVICE_BIND_CONFLICT") {
+                showError(data.message, "该设备已绑定其他卡号");
+            } else {
+                showError(data.error || "NFC 校验失败");
+            }
+            return;
+        }
+        nonce = data.nonce;
+        nonceExpiresAt = data.nonceExpiresAt;
+        serverTime = data.serverTime;
+
+        // 显示科室名
+        document.getElementById("deptName").value = data.dept;
+        // 显示打卡类型（用服务器时间，避免客户端改时间作弊）
+        document.getElementById("checkType").textContent = getCheckType(serverTime);
+
+        // 获取定位
+        await getPosition();
+        // 加载本人最近打卡记录
+        await loadMyRecords();
+        // 检查 nonce 是否过期
+        startNonceWatcher();
+    } catch (e) {
+        showError("网络错误：" + e.message, "请检查网络后重新触碰 NFC 标签");
+    }
+}
+
+function showError(msg, sub) {
+    document.getElementById("mainBox").style.display = "none";
+    document.getElementById("errBox").style.display = "block";
+    document.getElementById("errMsg").textContent = msg;
+    document.getElementById("errSub").textContent = sub || "";
+}
+
+function getCheckType(ts) {
+    const d = new Date(ts + 8 * 3600 * 1000); // 转 UTC+8
+    const total = d.getUTCHours() * 60 + d.getUTCMinutes();
+    if (total >= 6 * 60 && total <= 8 * 60) return "上午上班打卡";
+    if (total >= 11 * 60 && total <= 13 * 60) return "上午下班打卡";
+    if (total >= 13 * 60 && total <= 14 * 60) return "下午上班打卡";
+    if (total >= 17 * 60 && total <= 19 * 60) return "下午下班打卡";
+    return "补卡（非正常时段）";
+}
+
+// ---------- 5. 定位 ----------
+function getPosition() {
+    return new Promise((resolve) => {
+        if (!navigator.geolocation) {
+            setPosErr("设备不支持定位");
+            return resolve();
+        }
+        navigator.geolocation.getCurrentPosition(
+            pos => {
+                nowLat = pos.coords.latitude;
+                nowLng = pos.coords.longitude;
+                posOk = true;
+                setPosOk();
+                tryEnableSubmit();
+                resolve();
+            },
+            err => {
+                setPosErr("获取定位失败：" + (err.message || "请开启手机定位权限"));
+                resolve();
+            },
+            { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        );
+    });
+}
+function setPosOk() {
+    const el = document.getElementById("posText");
+    el.className = "pos-ok";
+    el.textContent = "✓ 定位已获取，可提交打卡";
+}
+function setPosErr(msg) {
+    const el = document.getElementById("posText");
+    el.className = "pos-err";
+    el.textContent = "✗ " + msg;
+}
+
+// ---------- 6. 启用提交按钮 ----------
+function tryEnableSubmit() {
+    const userCode = document.getElementById("userCode").value.trim();
+    const btn = document.getElementById("submitBtn");
+    btn.disabled = !(nonce && posOk && userCode && Date.now() < nonceExpiresAt);
+}
+
+document.getElementById("userCode").addEventListener("input", tryEnableSubmit);
+
+// ---------- 7. nonce 过期监控 ----------
+function startNonceWatcher() {
+    setInterval(() => {
+        if (Date.now() >= nonceExpiresAt) {
+            const btn = document.getElementById("submitBtn");
+            btn.disabled = true;
+            const posEl = document.getElementById("posText");
+            if (posEl.className !== "pos-err") {
+                posEl.className = "pos-err";
+                posEl.textContent = "✗ 打卡会话已超时，请重新触碰 NFC 标签";
+            }
+        }
+    }, 1000);
+}
+
+// ---------- 8. 提交打卡 ----------
+document.getElementById("submitBtn").addEventListener("click", async () => {
+    const userCode = document.getElementById("userCode").value.trim();
+    if (!userCode) { alert("请填写工号"); return; }
+    if (!nonce) { alert("会话已失效，请重新触碰 NFC 标签"); return; }
+    if (nowLat === null || nowLng === null) { alert("定位未获取"); return; }
+
+    const btn = document.getElementById("submitBtn");
+    btn.disabled = true;
+    btn.textContent = "提交中...";
+
+    try {
+        const resp = await fetch(API_BASE + "/api/checkin/submit", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                nonce, tagUid, deviceId, userCode,
+                lat: nowLat, lng: nowLng,
+            }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            btn.textContent = "提交打卡";
+            tryEnableSubmit();
+            if (data.error === "今日已打卡") {
+                alert("今日已打卡，无法重复打卡。\n上次打卡类型：" + data.lastCheckType);
+            } else {
+                alert(data.error || "打卡失败");
+            }
+            return;
+        }
+        // 打卡成功 → 强制跳转到完成页（不写入历史栈，无法返回）
+        const record = encodeURIComponent(JSON.stringify(data.record));
+        window.location.replace(DONE_PAGE + "?r=" + record);
+    } catch (e) {
+        btn.textContent = "提交打卡";
+        tryEnableSubmit();
+        alert("网络错误：" + e.message);
+    }
+});
+
+// ---------- 9. 加载本人最近打卡 ----------
+async function loadMyRecords() {
+    try {
+        const resp = await fetch(API_BASE + "/api/records/mine?deviceId=" + encodeURIComponent(deviceId));
+        const data = await resp.json();
+        const list = document.getElementById("recordList");
+        const records = data.records || [];
+        if (records.length === 0) {
+            list.innerHTML = '<div class="record-item" style="color:#9ca3af;">暂无打卡记录</div>';
+            return;
+        }
+        // 用 textContent 防 XSS
+        list.innerHTML = "";
+        records.forEach(r => {
+            const item = document.createElement("div");
+            item.className = "record-item";
+
+            const time = document.createElement("div");
+            time.textContent = formatTime(r.check_time);
+            time.style.fontWeight = "600";
+            item.appendChild(time);
+
+            const meta = document.createElement("div");
+            meta.textContent = `${r.dept} · ${r.check_type} · 距离 ${r.distance.toFixed(1)}m`;
+            meta.style.color = "#6b7280";
+            item.appendChild(meta);
+
+            const tag = document.createElement("span");
+            tag.className = "tag " + (r.status === "normal" ? "tag-normal" : "tag-abnormal");
+            tag.textContent = r.status === "normal" ? "正常" : "异常";
+            item.appendChild(tag);
+
+            list.appendChild(item);
+        });
+    } catch (e) {
+        console.error("加载记录失败", e);
+    }
+}
+
+function formatTime(ts) {
+    const d = new Date(ts + 8 * 3600 * 1000);
+    const pad = n => String(n).padStart(2, "0");
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+}
+
+// ---------- 10. 隐藏入口：长按 LOGO 5 秒跳管理员页 ----------
+let pressTimer = null;
+const logo = document.getElementById("logo");
+function startPress() {
+    pressTimer = setTimeout(() => {
+        window.location.href = ADMIN_PAGE;
+    }, 5000);
+}
+function cancelPress() {
+    if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+}
+logo.addEventListener("touchstart", startPress);
+logo.addEventListener("touchend", cancelPress);
+logo.addEventListener("touchcancel", cancelPress);
+logo.addEventListener("mousedown", startPress);
+logo.addEventListener("mouseup", cancelPress);
+logo.addEventListener("mouseleave", cancelPress);
+
+// ---------- 11. 禁止页面返回（兜底） ----------
+// 阻止 history.back() 回到本打卡页再次打卡
+window.history.pushState(null, "", window.location.href);
+window.addEventListener("popstate", function () {
+    window.history.pushState(null, "", window.location.href);
+    alert("已打卡页面不可返回，请重新触碰 NFC 标签打卡。");
+});
+</script>
+</body>
+</html>
