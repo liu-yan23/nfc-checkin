@@ -210,7 +210,8 @@ tr:hover{background:#f9fafb;}
 
 <script>
 // =====================【部署配置】=====================
-const API_BASE = "https://nfc-checkin.1120678174.workers.dev";
+// 前后端部署在同一 Cloudflare Pages 域名下，使用相对路径即可
+const API_BASE = "";
 // =======================================================
 
 let adminToken = sessionStorage.getItem("admin_token") || null;

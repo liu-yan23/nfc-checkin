@@ -83,10 +83,8 @@ button:disabled{background:#9ca3af;cursor:not-allowed;}
 
 <script>
 // =====================【部署配置区】=====================
-// 修改为你的 Cloudflare Worker 域名
-// 例如：https://nfc-checkin.your-account.workers.dev
-// 或自定义域名：https://checkin-api.yourdomain.com
-const API_BASE = "https://nfc-checkin.1120678174.workers.dev";
+// 前后端部署在同一 Cloudflare Pages 域名下，使用相对路径即可
+const API_BASE = "";
 
 // 学生完成页路径（打卡成功后跳转，与当前页同目录）
 const DONE_PAGE = "done.html";

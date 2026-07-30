@@ -1,0 +1,27 @@
+name = "nfc-checkin"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+# ============== D1 数据库 ==============
+[[d1_databases]]
+binding = "DB"
+database_name = "nfc-checkin-db"
+database_id = "13dddc75-d15f-48ed-81cb-24edf6e790f8"
+
+# ============== 环境变量（敏感信息用 secrets，不要写死在这里） ==============
+# 本地开发用 .dev.vars 文件：
+#   ADMIN_PASSWORD=your_admin_password
+#   JWT_SECRET=any_random_string
+#   ALLOWED_ORIGIN=http://localhost:8000
+#
+# 线上请用 wrangler secret 命令注入：
+#   wrangler secret put ADMIN_PASSWORD
+#   wrangler secret put JWT_SECRET
+#   wrangler secret put ALLOWED_ORIGIN
+[vars]
+ALLOWED_ORIGIN = "*"  # 部署后改为你的前端域名，如 https://yourname.github.io
+
+# ============== 可选：定时清理过期 nonce 与 session ==============
+# Cloudflare cron 使用 UTC 时间，"0 20 * * *" = UTC 20:00 = 北京时间 04:00
+[triggers]
+crons = ["0 20 * * *"]
