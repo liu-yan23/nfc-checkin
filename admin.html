@@ -114,7 +114,7 @@ tr:hover{background:#f9fafb;}
                     <table>
                         <thead><tr>
                             <th>时间</th><th>姓名</th><th>工号</th><th>科室</th>
-                            <th>类型</th><th>距离</th><th>状态</th><th>设备</th>
+                            <th>类型</th><th>距离</th><th>状态</th><th>原因</th><th>设备</th>
                         </tr></thead>
                         <tbody id="recordsBody"></tbody>
                     </table>
@@ -331,7 +331,7 @@ async function loadRecords() {
     // 表格
     const body = document.getElementById("recordsBody");
     if (records.length === 0) {
-        body.innerHTML = '<tr><td colspan="8" class="empty">暂无打卡记录</td></tr>';
+        body.innerHTML = '<tr><td colspan="9" class="empty">暂无打卡记录</td></tr>';
         return;
     }
     body.innerHTML = "";
@@ -345,6 +345,7 @@ async function loadRecords() {
             esc(r.check_type),
             (r.distance || 0).toFixed(1) + "m",
             `<span class="tag ${r.status === 'normal' ? 'tag-normal' : 'tag-abnormal'}">${r.status === 'normal' ? '正常' : '异常'}</span>`,
+            r.reason ? esc(r.reason) : '<span style="color:#d1d5db;">-</span>',
             esc(r.device_id).slice(0, 8) + "...",
         ];
         cells.forEach(c => {
@@ -378,6 +379,7 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
         科室: r.dept,
         打卡类型: r.check_type,
         状态: r.status === "normal" ? "正常" : "异常",
+        补卡原因: r.reason || "",
         距离米: (r.distance || 0).toFixed(1),
         纬度: r.lat,
         经度: r.lng,

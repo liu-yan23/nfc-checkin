@@ -82,6 +82,7 @@ function renderSuccess(rec) {
     appendRow("打卡类型", rec.checkType);
     appendRow("打卡时间", formatTime(rec.checkTime));
     appendRow("与科室距离", rec.distance + " 米");
+    if (rec.reason) appendRow("补卡原因", rec.reason);
 
     const tip = document.createElement("div");
     tip.className = "tip";

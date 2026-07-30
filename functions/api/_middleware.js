@@ -25,13 +25,24 @@ function getDistance(lat1, lng1, lat2, lng2) {
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 function getCheckType(ts) {
-  var d = new Date(ts + 8 * 3600 * 1000);
+  var d = new Date(ts + 8 * 3600 * 1000); // 转 UTC+8
   var total = d.getUTCHours() * 60 + d.getUTCMinutes();
-  if (total >= 360 && total <= 480) return { type: '上午上班打卡', status: 'normal' };
-  if (total >= 660 && total <= 780) return { type: '上午下班打卡', status: 'normal' };
-  if (total >= 780 && total <= 840) return { type: '下午上班打卡', status: 'normal' };
-  if (total >= 1020 && total <= 1140) return { type: '下午下班打卡', status: 'normal' };
-  return { type: '补卡', status: 'abnormal' };
+  // 00:00-06:59 夜班补卡(跨日,归前一天)
+  if (total < 420) return { type: '夜班', status: 'abnormal', crossDay: true };
+  // 07:00-08:00 上午上班正常
+  if (total <= 480) return { type: '上午上班', status: 'normal' };
+  // 08:01-11:29 上午上班补卡
+  if (total < 690) return { type: '上午上班', status: 'abnormal' };
+  // 11:30-12:59 上午下班正常
+  if (total < 780) return { type: '上午下班', status: 'normal' };
+  // 13:00-14:00 下午上班正常
+  if (total <= 840) return { type: '下午上班', status: 'normal' };
+  // 14:01-16:59 下午上班补卡
+  if (total < 1020) return { type: '下午上班', status: 'abnormal' };
+  // 17:00-20:59 下午下班正常
+  if (total < 1260) return { type: '下午下班', status: 'normal' };
+  // 21:00-23:59 夜班正常
+  return { type: '夜班', status: 'normal' };
 }
 function getIp(req) {
   return req.headers.get('CF-Connecting-IP') || (req.headers.get('X-Forwarded-For') || '').split(',')[0].trim() || 'unknown';
@@ -86,15 +97,18 @@ async function initDb(env) {
     'CREATE TABLE IF NOT EXISTS users (user_code TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL)',
     'CREATE TABLE IF NOT EXISTS dept_positions (dept TEXT PRIMARY KEY, lat REAL NOT NULL, lng REAL NOT NULL, radius INTEGER NOT NULL)',
     'CREATE TABLE IF NOT EXISTS device_binds (device_id TEXT PRIMARY KEY, tag_uid TEXT NOT NULL, user_code TEXT, bound_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL)',
-    'CREATE TABLE IF NOT EXISTS checkins (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_uid TEXT NOT NULL, user_code TEXT NOT NULL, user_name TEXT NOT NULL, dept TEXT NOT NULL, check_type TEXT NOT NULL, status TEXT NOT NULL, check_time INTEGER NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, distance REAL NOT NULL, device_id TEXT NOT NULL, ip TEXT, ua TEXT, created_at INTEGER NOT NULL, checkin_date TEXT NOT NULL, UNIQUE(tag_uid, checkin_date))',
+    'CREATE TABLE IF NOT EXISTS checkins (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_uid TEXT NOT NULL, user_code TEXT NOT NULL, user_name TEXT NOT NULL, dept TEXT NOT NULL, check_type TEXT NOT NULL, status TEXT NOT NULL, check_time INTEGER NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, distance REAL NOT NULL, device_id TEXT NOT NULL, ip TEXT, ua TEXT, created_at INTEGER NOT NULL, checkin_date TEXT NOT NULL, reason TEXT, UNIQUE(user_code, checkin_date, check_type))',
     'CREATE TABLE IF NOT EXISTS nonces (nonce TEXT PRIMARY KEY, tag_uid TEXT NOT NULL, device_id TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, used INTEGER DEFAULT 0)',
     'CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT NOT NULL, detail TEXT, device_id TEXT, ip TEXT, created_at INTEGER NOT NULL)',
     'CREATE TABLE IF NOT EXISTS admin_sessions (token TEXT PRIMARY KEY, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS idx_checkins_time ON checkins(check_time)',
     'CREATE INDEX IF NOT EXISTS idx_checkins_tag ON checkins(tag_uid)',
+    'CREATE INDEX IF NOT EXISTS idx_checkins_user_date ON checkins(user_code, checkin_date)',
     'CREATE INDEX IF NOT EXISTS idx_nonces_expires ON nonces(expires_at)',
   ];
   for (var i = 0; i < stmts.length; i++) { await env.DB.exec(stmts[i]).catch(function(){}); }
+  // 已有表向前兼容:自动添加 reason 字段(若不存在)
+  try { await env.DB.prepare('SELECT reason FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN reason TEXT').catch(function(){}); }
   var now = Date.now();
   await env.DB.prepare("INSERT OR IGNORE INTO nfc_tags (uid, dept, created_at) VALUES ('538b1cce330001', '急诊', ?), ('04b771cc223311', '护士站', ?)").bind(now, now).run();
   await env.DB.prepare("INSERT OR IGNORE INTO users (user_code, name, created_at) VALUES ('001', '刘六六', ?), ('002', '李四', ?)").bind(now, now).run();
@@ -144,7 +158,7 @@ async function handleCheckinInit(req, env) {
 
 async function handleCheckinSubmit(req, env) {
   var body = await req.json();
-  var n = body.nonce, t = body.tagUid, d = body.deviceId, u = body.userCode, lat = body.lat, lng = body.lng;
+  var n = body.nonce, t = body.tagUid, d = body.deviceId, u = body.userCode, lat = body.lat, lng = body.lng, reason = body.reason;
   if (!n || !t || !d || !u) return json({ error: '参数缺失' }, 400);
   if (typeof lat !== 'number' || typeof lng !== 'number') return json({ error: '定位数据格式错误' }, 400);
   var uid = String(t).toLowerCase().trim(), now = Date.now(), ip = getIp(req), ua = req.headers.get('User-Agent') || '';
@@ -167,10 +181,22 @@ async function handleCheckinSubmit(req, env) {
   var user = await env.DB.prepare('SELECT user_code, name FROM users WHERE user_code = ?').bind(u).first();
   if (!user) { await audit(env, 'user_invalid', '非法工号: ' + u, d, ip); return json({ error: '工号不在白名单内' }, 403); }
 
-  var ts = new Date(now + 28800000); ts.setUTCHours(0,0,0,0);
-  var todayTs = ts.getTime() - 28800000;
-  var exist = await env.DB.prepare('SELECT id, check_time, check_type FROM checkins WHERE tag_uid = ? AND check_time >= ? ORDER BY check_time DESC LIMIT 1').bind(uid, todayTs).first();
-  if (exist) return json({ error: '今日已打卡', lastCheckTime: exist.check_time, lastCheckType: exist.check_type }, 409);
+  // 计算卡类型和 checkin_date(UTC+8),夜班补卡跨日归前一天
+  var ct = getCheckType(now);
+  var d8 = new Date(now + 28800000);
+  if (ct.crossDay) d8.setUTCDate(d8.getUTCDate() - 1);
+  var cdate = d8.toISOString().slice(0, 10);
+
+  // 防重复:同一工号 + 同一天 + 同一卡类型 只能打一次
+  var exist = await env.DB.prepare('SELECT id, check_time, check_type FROM checkins WHERE user_code = ? AND checkin_date = ? AND check_type = ? ORDER BY check_time DESC LIMIT 1').bind(u, cdate, ct.type).first();
+  if (exist) return json({ error: '今日该卡类型已打卡', lastCheckTime: exist.check_time, lastCheckType: exist.check_type }, 409);
+
+  // 补卡状态下,reason 必填且不超过 20 字
+  if (ct.status === 'abnormal') {
+    if (!reason || !String(reason).trim()) return json({ error: '补卡状态下必须填写补卡原因(不超过20字)' }, 400);
+    if (String(reason).trim().length > 20) return json({ error: '补卡原因不超过 20 字' }, 400);
+  }
+  var reasonVal = ct.status === 'abnormal' ? String(reason).trim() : null;
 
   var tag = await env.DB.prepare('SELECT dept FROM nfc_tags WHERE uid = ?').bind(uid).first();
   if (!tag) return json({ error: 'NFC 标签已失效' }, 403);
@@ -183,17 +209,14 @@ async function handleCheckinSubmit(req, env) {
     return json({ error: '定位异常', distance: dis.toFixed(1), limit: pos.radius, message: '超出打卡范围 ' + dis.toFixed(1) + ' 米，禁止打卡' }, 403);
   }
 
-  var ct = getCheckType(now);
-  var cdate = new Date(now + 28800000).toISOString().slice(0, 10);
-
-  var stmt = env.DB.prepare('INSERT INTO checkins (tag_uid, user_code, user_name, dept, check_type, status, check_time, lat, lng, distance, device_id, ip, ua, created_at, checkin_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uid, u, user.name, tag.dept, ct.type, ct.status, now, lat, lng, dis, d, ip, ua, now, cdate);
-  try { await stmt.run(); } catch (e) { if (String(e.message).indexOf('UNIQUE') >= 0) return json({ error: '今日已打卡' }, 409); throw e; }
+  var stmt = env.DB.prepare('INSERT INTO checkins (tag_uid, user_code, user_name, dept, check_type, status, check_time, lat, lng, distance, device_id, ip, ua, created_at, checkin_date, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uid, u, user.name, tag.dept, ct.type, ct.status, now, lat, lng, dis, d, ip, ua, now, cdate, reasonVal);
+  try { await stmt.run(); } catch (e) { if (String(e.message).indexOf('UNIQUE') >= 0) return json({ error: '今日该卡类型已打卡' }, 409); throw e; }
 
   await env.DB.prepare('UPDATE nonces SET used = 1 WHERE nonce = ?').bind(n).run();
   await env.DB.prepare('UPDATE device_binds SET user_code = ?, last_seen_at = ? WHERE device_id = ?').bind(u, now, d).run();
-  await audit(env, 'checkin_ok', user.name + '(' + u + ') 打卡: ' + tag.dept + ' - ' + ct.type + ', 距离 ' + dis.toFixed(1) + 'm', d, ip);
+  await audit(env, 'checkin_ok', user.name + '(' + u + ') 打卡: ' + tag.dept + ' - ' + ct.type + (ct.status === 'abnormal' ? '(补卡:' + reasonVal + ')' : '') + ', 距离 ' + dis.toFixed(1) + 'm', d, ip);
 
-  return json({ ok: true, record: { userName: user.name, userCode: u, dept: tag.dept, checkType: ct.type, checkTime: now, distance: dis.toFixed(1) } });
+  return json({ ok: true, record: { userName: user.name, userCode: u, dept: tag.dept, checkType: ct.type, checkTime: now, distance: dis.toFixed(1), status: ct.status, reason: reasonVal } });
 }
 
 async function handleMyRecords(req, env) {

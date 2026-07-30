@@ -68,6 +68,10 @@ button:disabled{background:#9ca3af;cursor:not-allowed;}
                 <label>打卡类型（服务器时间判定）</label>
                 <div><span id="checkType">--</span></div>
             </div>
+            <div class="row" id="reasonRow" style="display:none;">
+                <label>补卡原因（必填，不超过20字）</label>
+                <input type="text" id="reasonInput" placeholder="请简述补卡原因" maxlength="20" autocomplete="off">
+            </div>
             <button id="submitBtn" disabled>提交打卡</button>
         </div>
 
@@ -163,6 +167,10 @@ async function bootstrap() {
         document.getElementById("deptName").value = data.dept;
         // 显示打卡类型（用服务器时间，避免客户端改时间作弊）
         document.getElementById("checkType").textContent = getCheckType(serverTime);
+        // 补卡时段显示原因输入框
+        if (isAbnormalSlot(serverTime)) {
+            document.getElementById("reasonRow").style.display = "block";
+        }
 
         // 若设备已绑定工号,预填并锁定输入框(一台手机只能给一个工号打卡)
         const userCodeInput = document.getElementById("userCode");
@@ -201,11 +209,32 @@ function showError(msg, sub) {
 function getCheckType(ts) {
     const d = new Date(ts + 8 * 3600 * 1000); // 转 UTC+8
     const total = d.getUTCHours() * 60 + d.getUTCMinutes();
-    if (total >= 6 * 60 && total <= 8 * 60) return "上午上班打卡";
-    if (total >= 11 * 60 && total <= 13 * 60) return "上午下班打卡";
-    if (total >= 13 * 60 && total <= 14 * 60) return "下午上班打卡";
-    if (total >= 17 * 60 && total <= 19 * 60) return "下午下班打卡";
-    return "补卡（非正常时段）";
+    // 00:00-06:59 夜班补卡(跨日,归前一天)
+    if (total < 420) return "夜班（补卡）";
+    // 07:00-08:00 上午上班正常
+    if (total <= 480) return "上午上班";
+    // 08:01-11:29 上午上班补卡
+    if (total < 690) return "上午上班（补卡）";
+    // 11:30-12:59 上午下班正常
+    if (total < 780) return "上午下班";
+    // 13:00-14:00 下午上班正常
+    if (total <= 840) return "下午上班";
+    // 14:01-16:59 下午上班补卡
+    if (total < 1020) return "下午上班（补卡）";
+    // 17:00-20:59 下午下班正常
+    if (total < 1260) return "下午下班";
+    // 21:00-23:59 夜班正常
+    return "夜班";
+}
+
+// 判断当前时间是否为补卡状态(用于显示原因输入框)
+function isAbnormalSlot(ts) {
+    const d = new Date(ts + 8 * 3600 * 1000);
+    const total = d.getUTCHours() * 60 + d.getUTCMinutes();
+    if (total < 420) return true;           // 00:00-06:59 夜班补卡
+    if (total > 480 && total < 690) return true;  // 08:01-11:29 上午上班补卡
+    if (total > 840 && total < 1020) return true; // 14:01-16:59 下午上班补卡
+    return false;
 }
 
 // ---------- 5. 定位 ----------
@@ -246,11 +275,15 @@ function setPosErr(msg) {
 // ---------- 6. 启用提交按钮 ----------
 function tryEnableSubmit() {
     const userCode = document.getElementById("userCode").value.trim();
+    const reasonRow = document.getElementById("reasonRow");
+    const reasonRequired = reasonRow.style.display !== "none";
+    const reason = document.getElementById("reasonInput").value.trim();
     const btn = document.getElementById("submitBtn");
-    btn.disabled = !(nonce && posOk && userCode && Date.now() < nonceExpiresAt);
+    btn.disabled = !(nonce && posOk && userCode && Date.now() < nonceExpiresAt && (!reasonRequired || reason));
 }
 
 document.getElementById("userCode").addEventListener("input", tryEnableSubmit);
+document.getElementById("reasonInput").addEventListener("input", tryEnableSubmit);
 
 // ---------- 7. nonce 过期监控 ----------
 function startNonceWatcher() {
@@ -283,16 +316,18 @@ document.getElementById("submitBtn").addEventListener("click", async () => {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                nonce, tagUid, deviceId, userCode,
+                nonce, tagUid, deviceId,
+                userCode: document.getElementById("userCode").value.trim(),
                 lat: nowLat, lng: nowLng,
+                reason: document.getElementById("reasonInput").value.trim(),
             }),
         });
         const data = await resp.json();
         if (!resp.ok) {
             btn.textContent = "提交打卡";
             tryEnableSubmit();
-            if (data.error === "今日已打卡") {
-                alert("今日已打卡，无法重复打卡。\n上次打卡类型：" + data.lastCheckType);
+            if (data.error === "今日已打卡" || data.error === "今日该卡类型已打卡") {
+                alert("该类型今日已打卡，无法重复打卡。\n上次打卡类型：" + (data.lastCheckType || ""));
             } else if (data.error === "DEVICE_USER_CONFLICT") {
                 alert(data.message || "该设备已绑定其他工号，无法打卡");
             } else {
