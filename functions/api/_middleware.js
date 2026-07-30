@@ -29,15 +29,15 @@ function getCheckType(ts) {
   var total = d.getUTCHours() * 60 + d.getUTCMinutes();
   // 00:00-06:59 夜班补卡(跨日,归前一天)
   if (total < 420) return { type: '夜班', status: 'abnormal', crossDay: true };
-  // 07:00-08:00 上午上班正常
-  if (total <= 480) return { type: '上午上班', status: 'normal' };
-  // 08:01-11:29 上午上班补卡
+  // 07:00-08:02 上午上班正常(结束宽裕2分钟,避免边界争议)
+  if (total <= 482) return { type: '上午上班', status: 'normal' };
+  // 08:03-11:29 上午上班补卡
   if (total < 690) return { type: '上午上班', status: 'abnormal' };
   // 11:30-12:59 上午下班正常
   if (total < 780) return { type: '上午下班', status: 'normal' };
-  // 13:00-14:00 下午上班正常
-  if (total <= 840) return { type: '下午上班', status: 'normal' };
-  // 14:01-16:59 下午上班补卡
+  // 13:00-14:02 下午上班正常(结束宽裕2分钟)
+  if (total <= 842) return { type: '下午上班', status: 'normal' };
+  // 14:03-16:59 下午上班补卡
   if (total < 1020) return { type: '下午上班', status: 'abnormal' };
   // 17:00-20:59 下午下班正常
   if (total < 1260) return { type: '下午下班', status: 'normal' };
@@ -81,6 +81,9 @@ export async function onRequest(context) {
       if (path === '/api/admin/whitelist/batch' && method === 'POST') return handleBatchWhitelist(req, env);
       if (path === '/api/admin/whitelist' && method === 'DELETE') return handleDeleteWhitelist(req, env);
       if (path === '/api/admin/reset-db' && method === 'POST') return handleResetDb(req, env);
+      if (path === '/api/admin/backups' && method === 'GET') return handleListBackups(req, env);
+      if (path === '/api/admin/backups/download' && method === 'GET') return handleDownloadBackup(req, env);
+      if (path === '/api/admin/rotate-tag' && method === 'POST') return handleRotateTag(req, env);
       if (path === '/api/admin/devices' && method === 'GET') return handleDevices(req, env);
       if (path === '/api/audit' && method === 'GET') return handleAudit(req, env);
     }
@@ -108,8 +111,11 @@ async function initDb(env) {
     'CREATE INDEX IF NOT EXISTS idx_nonces_expires ON nonces(expires_at)',
   ];
   for (var i = 0; i < stmts.length; i++) { await env.DB.exec(stmts[i]).catch(function(){}); }
-  // 已有表向前兼容:自动添加 reason 字段(若不存在)
+  // 已有表向前兼容:自动添加 reason / location_status 字段(若不存在)
   try { await env.DB.prepare('SELECT reason FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN reason TEXT').catch(function(){}); }
+  try { await env.DB.prepare('SELECT location_status FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN location_status TEXT').catch(function(){}); }
+  // 数据备份表(reset 前自动备份用)
+  await env.DB.exec('CREATE TABLE IF NOT EXISTS data_backups (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, data_json TEXT NOT NULL)').catch(function(){});
   var now = Date.now();
   await env.DB.prepare("INSERT OR IGNORE INTO nfc_tags (uid, dept, created_at) VALUES ('538b1cce330001', '急诊', ?), ('04b771cc223311', '护士站', ?)").bind(now, now).run();
   await env.DB.prepare("INSERT OR IGNORE INTO users (user_code, name, created_at) VALUES ('001', '刘六六', ?), ('002', '李四', ?)").bind(now, now).run();
@@ -125,11 +131,17 @@ async function audit(env, event, detail, deviceId, ip) {
 async function handleAdminLogin(req, env) {
   var body = await req.json();
   if (!body.password) return json({ error: '请输入口令' }, 400);
+  var ip = getIp(req), now = Date.now();
+  // 登录限速:同 IP 最近 15 分钟内失败 5 次即锁定 15 分钟
+  var fails = await env.DB.prepare('SELECT COUNT(*) as cnt FROM audit_logs WHERE event = ? AND ip = ? AND created_at > ?').bind('admin_login_failed', ip, now - 900000).first();
+  if (fails && fails.cnt >= 5) {
+    return json({ error: '登录失败次数过多,已锁定 15 分钟,请稍后再试' }, 429);
+  }
   if (body.password !== env.ADMIN_PASSWORD) {
-    await audit(env, 'admin_login_failed', '口令错误', null, getIp(req));
+    await audit(env, 'admin_login_failed', '口令错误', null, ip);
     return json({ error: '口令错误' }, 401);
   }
-  var token = randomToken(32), now = Date.now(), expires = now + 7200000;
+  var token = randomToken(32), expires = now + 7200000;
   await env.DB.prepare('INSERT INTO admin_sessions (token, created_at, expires_at) VALUES (?, ?, ?)').bind(token, now, expires).run();
   await audit(env, 'admin_login_ok', '管理员登录成功', null, getIp(req));
   return json({ token: token, expiresAt: expires });
@@ -163,6 +175,11 @@ async function handleCheckinSubmit(req, env) {
   if (!n || !t || !d || !u) return json({ error: '参数缺失' }, 400);
   if (typeof lat !== 'number' || typeof lng !== 'number') return json({ error: '定位数据格式错误' }, 400);
   var uid = String(t).toLowerCase().trim(), now = Date.now(), ip = getIp(req), ua = req.headers.get('User-Agent') || '';
+  // 打卡提交限速:同 IP 1分钟最多5次操作
+  var recentActions = await env.DB.prepare('SELECT COUNT(*) as cnt FROM audit_logs WHERE ip = ? AND created_at > ?').bind(ip, now - 60000).first();
+  if (recentActions && recentActions.cnt >= 5) {
+    return json({ error: '操作过于频繁,请 1 分钟后再试' }, 429);
+  }
 
   var nc = await env.DB.prepare('SELECT nonce, tag_uid, device_id, expires_at, used FROM nonces WHERE nonce = ?').bind(n).first();
   if (!nc) return json({ error: 'nonce 无效，请重新触碰 NFC 标签' }, 403);
@@ -192,10 +209,17 @@ async function handleCheckinSubmit(req, env) {
   var exist = await env.DB.prepare('SELECT id, check_time, check_type FROM checkins WHERE user_code = ? AND checkin_date = ? AND check_type = ? ORDER BY check_time DESC LIMIT 1').bind(u, cdate, ct.type).first();
   if (exist) return json({ error: '今日该卡类型已打卡', lastCheckTime: exist.check_time, lastCheckType: exist.check_type }, 409);
 
-  // 补卡状态下,reason 必填且不超过 20 字
+  // 补卡状态下,reason 必填且不超过 20 字,且月度补卡不超过5次
   if (ct.status === 'abnormal') {
     if (!reason || !String(reason).trim()) return json({ error: '补卡状态下必须填写补卡原因(不超过20字)' }, 400);
     if (String(reason).trim().length > 20) return json({ error: '补卡原因不超过 20 字' }, 400);
+    // 月度补卡次数上限:5次(按 UTC+8 当月)
+    var mStart = new Date(now + 28800000); mStart.setUTCDate(1); mStart.setUTCHours(0, 0, 0, 0);
+    var monthStartTs = mStart.getTime() - 28800000;
+    var makeupCount = await env.DB.prepare('SELECT COUNT(*) as cnt FROM checkins WHERE user_code = ? AND status = ? AND check_time >= ?').bind(u, 'abnormal', monthStartTs).first();
+    if (makeupCount && makeupCount.cnt >= 5) {
+      return json({ error: '本月补卡次数已达上限(5次),无法继续补卡' }, 403);
+    }
   }
   var reasonVal = ct.status === 'abnormal' ? String(reason).trim() : null;
 
@@ -205,19 +229,34 @@ async function handleCheckinSubmit(req, env) {
   if (!pos) return json({ error: '科室「' + tag.dept + '」未配置坐标' }, 500);
 
   var dis = getDistance(lat, lng, pos.lat, pos.lng);
+  var maxRadius = pos.radius + 300; // 范围外300米内允许打卡但标记定位异常
+  var locationAbnormal = false;
   if (dis > pos.radius) {
-    await audit(env, 'location_abnormal', 'UID ' + uid + ' 定位超出范围 ' + dis.toFixed(1) + 'm', d, ip);
-    return json({ error: '定位异常', distance: dis.toFixed(1), limit: pos.radius, message: '超出打卡范围 ' + dis.toFixed(1) + ' 米，禁止打卡' }, 403);
+    locationAbnormal = true;
+    await audit(env, 'location_abnormal', 'UID ' + uid + ' 定位超出范围 ' + dis.toFixed(1) + 'm (半径' + pos.radius + 'm,上限' + maxRadius + 'm)', d, ip);
+    if (dis > maxRadius) {
+      return json({ error: '定位异常', distance: dis.toFixed(1), limit: maxRadius, message: '超出打卡范围 ' + dis.toFixed(1) + ' 米(上限 ' + maxRadius + ' 米),禁止打卡' }, 403);
+    }
   }
+  // 坐标跳跃检测:同设备5分钟内坐标跳跃>1km 标记异常
+  var recentChk = await env.DB.prepare('SELECT lat, lng FROM checkins WHERE device_id = ? AND check_time > ? ORDER BY check_time DESC LIMIT 1').bind(d, now - 300000).first();
+  if (recentChk) {
+    var jumpDist = getDistance(lat, lng, recentChk.lat, recentChk.lng);
+    if (jumpDist > 1000) {
+      locationAbnormal = true;
+      await audit(env, 'location_jump', '设备 ' + d + ' 5分钟内坐标跳跃 ' + jumpDist.toFixed(1) + 'm', d, ip);
+    }
+  }
+  var locStatus = locationAbnormal ? 'abnormal' : 'normal';
 
-  var stmt = env.DB.prepare('INSERT INTO checkins (tag_uid, user_code, user_name, dept, check_type, status, check_time, lat, lng, distance, device_id, ip, ua, created_at, checkin_date, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uid, u, user.name, tag.dept, ct.type, ct.status, now, lat, lng, dis, d, ip, ua, now, cdate, reasonVal);
+  var stmt = env.DB.prepare('INSERT INTO checkins (tag_uid, user_code, user_name, dept, check_type, status, check_time, lat, lng, distance, device_id, ip, ua, created_at, checkin_date, reason, location_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uid, u, user.name, tag.dept, ct.type, ct.status, now, lat, lng, dis, d, ip, ua, now, cdate, reasonVal, locStatus);
   try { await stmt.run(); } catch (e) { if (String(e.message).indexOf('UNIQUE') >= 0) return json({ error: '今日该卡类型已打卡' }, 409); throw e; }
 
   await env.DB.prepare('UPDATE nonces SET used = 1 WHERE nonce = ?').bind(n).run();
   await env.DB.prepare('UPDATE device_binds SET user_code = ?, last_seen_at = ? WHERE device_id = ?').bind(u, now, d).run();
-  await audit(env, 'checkin_ok', user.name + '(' + u + ') 打卡: ' + tag.dept + ' - ' + ct.type + (ct.status === 'abnormal' ? '(补卡:' + reasonVal + ')' : '') + ', 距离 ' + dis.toFixed(1) + 'm', d, ip);
+  await audit(env, 'checkin_ok', user.name + '(' + u + ') 打卡: ' + tag.dept + ' - ' + ct.type + (ct.status === 'abnormal' ? '(补卡:' + reasonVal + ')' : '') + ', 距离 ' + dis.toFixed(1) + 'm' + (locationAbnormal ? '[定位异常]' : ''), d, ip);
 
-  return json({ ok: true, record: { userName: user.name, userCode: u, dept: tag.dept, checkType: ct.type, checkTime: now, distance: dis.toFixed(1), status: ct.status, reason: reasonVal } });
+  return json({ ok: true, record: { userName: user.name, userCode: u, dept: tag.dept, checkType: ct.type, checkTime: now, distance: dis.toFixed(1), status: ct.status, reason: reasonVal, locationStatus: locStatus } });
 }
 
 async function handleMyRecords(req, env) {
@@ -332,14 +371,26 @@ async function handleBatchWhitelist(req, env) {
   }
 }
 
-// 危险操作:重置数据库(清空打卡/设备/会话数据,保留白名单)
+// 危险操作:重置数据库(清空前强制备份,保留白名单)
 // 入参: { confirm: 'YES_RESET' }  防止误触发
 async function handleResetDb(req, env) {
   var body = await req.json().catch(function () { return {}; });
   if (body.confirm !== 'YES_RESET') {
     return json({ error: '请确认重置操作(confirm 参数必须为 YES_RESET)' }, 400);
   }
-  // 按顺序删除 5 张表(保留 nfc_tags / users / dept_positions 白名单)
+  // 强制备份:导出5张表数据到 data_backups
+  await env.DB.exec('CREATE TABLE IF NOT EXISTS data_backups (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, data_json TEXT NOT NULL)').catch(function(){});
+  var backup = { created_at: Date.now(), tables: {} };
+  var tableNames = ['checkins', 'device_binds', 'nonces', 'admin_sessions', 'audit_logs'];
+  for (var i = 0; i < tableNames.length; i++) {
+    var rows = await env.DB.prepare('SELECT * FROM ' + tableNames[i]).all().catch(function () { return { results: [] }; });
+    backup.tables[tableNames[i]] = (rows && rows.results) || [];
+  }
+  var backupJson = JSON.stringify(backup);
+  var backupRes = await env.DB.prepare('INSERT INTO data_backups (created_at, data_json) VALUES (?, ?)').bind(backup.created_at, backupJson).run();
+  var backupId = backupRes.meta ? backupRes.meta.last_row_id : null;
+
+  // 按顺序删除 5 张表(保留 nfc_tags / users / dept_positions / data_backups 白名单和备份)
   var drops = [
     'DROP TABLE IF EXISTS checkins',
     'DROP TABLE IF EXISTS device_binds',
@@ -347,13 +398,46 @@ async function handleResetDb(req, env) {
     'DROP TABLE IF EXISTS admin_sessions',
     'DROP TABLE IF EXISTS audit_logs',
   ];
-  for (var i = 0; i < drops.length; i++) {
-    await env.DB.exec(drops[i]).catch(function () {});
+  for (var j = 0; j < drops.length; j++) {
+    await env.DB.exec(drops[j]).catch(function () {});
   }
   // 重建表 + 索引(调用 initDb,INSERT OR IGNORE 不会覆盖已有白名单)
   await initDb(env);
-  await audit(env, 'db_reset', '管理员重置数据库:清空打卡/设备/会话数据,保留白名单', null, getIp(req));
-  return json({ ok: true, message: '数据库已重置。打卡记录、设备绑定、nonce、管理员会话已清空,白名单(nfc_tags/users/dept_positions)已保留。当前管理员会话已失效,请重新登录。' });
+  // 重新写入审计日志表(reset 删了 audit_logs,需要重建后写一条记录)
+  await env.DB.exec('CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT NOT NULL, detail TEXT, device_id TEXT, ip TEXT, created_at INTEGER NOT NULL)').catch(function(){});
+  await env.DB.prepare('INSERT INTO audit_logs (event, detail, device_id, ip, created_at) VALUES (?, ?, ?, ?, ?)').bind('db_reset', '管理员重置数据库,备份ID=' + backupId + ',已清空打卡/设备/会话数据,保留白名单', null, getIp(req), Date.now()).run();
+  return json({ ok: true, backupId: backupId, message: '数据库已重置。清空前已自动备份(备份ID: ' + backupId + ')。打卡记录、设备绑定、nonce、管理员会话已清空,白名单已保留。当前管理员会话已失效,请重新登录。' });
+}
+
+// 查看备份列表
+async function handleListBackups(req, env) {
+  var rows = await env.DB.prepare('SELECT id, created_at, length(data_json) as size FROM data_backups ORDER BY id DESC LIMIT 50').all().catch(function () { return { results: [] }; });
+  return json({ backups: (rows && rows.results) || [] });
+}
+
+// 下载备份JSON
+async function handleDownloadBackup(req, env) {
+  var u = new URL(req.url);
+  var id = parseInt(u.searchParams.get('id'));
+  if (!id) return json({ error: '缺少 id' }, 400);
+  var row = await env.DB.prepare('SELECT id, created_at, data_json FROM data_backups WHERE id = ?').bind(id).first();
+  if (!row) return json({ error: '备份不存在' }, 404);
+  return new Response(row.data_json, { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="backup-' + id + '-' + row.created_at + '.json"', ...corsHeaders() } });
+}
+
+// NFC 标签 UID 轮换(针对 NFC 贴片被复制的风险)
+// 生成新 UID,旧 UID 立即失效,需重新写贴片
+async function handleRotateTag(req, env) {
+  var body = await req.json();
+  if (!body.uid) return json({ error: '缺少 uid(要轮换的旧UID)' }, 400);
+  var oldUid = String(body.uid).toLowerCase().trim();
+  var tag = await env.DB.prepare('SELECT uid, dept FROM nfc_tags WHERE uid = ?').bind(oldUid).first();
+  if (!tag) return json({ error: 'NFC 标签不存在' }, 404);
+  var newUid = randomToken(7); // 14位十六进制,模拟NFC UID格式
+  await env.DB.prepare('DELETE FROM nfc_tags WHERE uid = ?').bind(oldUid).run();
+  await env.DB.prepare('INSERT INTO nfc_tags (uid, dept, created_at) VALUES (?, ?, ?)').bind(newUid, tag.dept, Date.now()).run();
+  await audit(env, 'tag_rotate', 'NFC标签轮换: ' + oldUid + ' → ' + newUid + ' (科室: ' + tag.dept + ')', null, getIp(req));
+  return json({ ok: true, oldUid: oldUid, newUid: newUid, dept: tag.dept, url: 'https://nfc-checkin-1om.pages.dev/index.html?tagUid=' + newUid });
 }
 
 async function handleDeleteWhitelist(req, env) {

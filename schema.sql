@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS checkins (
   created_at INTEGER NOT NULL,
   checkin_date TEXT NOT NULL,    -- YYYY-MM-DD (UTC+8),夜班补卡跨日归前一天
   reason TEXT,                    -- 补卡原因(补卡时必填,≤20字;正常打卡为 NULL)
+  location_status TEXT,           -- 定位状态: normal 正常 / abnormal 定位异常(超出半径但在300米宽限内)
   UNIQUE(user_code, checkin_date, check_type)
 );
 
@@ -85,6 +86,13 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
   token TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL
+);
+
+-- 数据备份(reset 前自动备份,JSON 格式存储)
+CREATE TABLE IF NOT EXISTS data_backups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at INTEGER NOT NULL,
+  data_json TEXT NOT NULL
 );
 
 -- 索引
@@ -142,6 +150,7 @@ INSERT OR IGNORE INTO dept_positions (dept, lat, lng, radius) VALUES
 --   created_at INTEGER NOT NULL,
 --   checkin_date TEXT NOT NULL,
 --   reason TEXT,
+--   location_status TEXT,
 --   UNIQUE(user_code, checkin_date, check_type)
 -- );
 --

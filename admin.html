@@ -114,7 +114,7 @@ tr:hover{background:#f9fafb;}
                     <table>
                         <thead><tr>
                             <th>时间</th><th>姓名</th><th>工号</th><th>科室</th>
-                            <th>类型</th><th>距离</th><th>状态</th><th>原因</th><th>设备</th>
+                            <th>类型</th><th>距离</th><th>状态</th><th>定位</th><th>原因</th><th>设备</th>
                         </tr></thead>
                         <tbody id="recordsBody"></tbody>
                     </table>
@@ -139,10 +139,16 @@ tr:hover{background:#f9fafb;}
                     <div style="font-weight:600;color:#b91c1c;margin-bottom:6px;">⚠ 危险操作区</div>
                     <div style="font-size:12px;color:#7f1d1d;line-height:1.6;margin-bottom:10px;">
                         <strong>重置数据库</strong>:清空所有打卡记录、设备绑定、nonce、管理员会话,保留白名单(NFC标签/学生/科室位置)。<br>
+                        <strong style="color:#059669;">✓ 清空前会自动备份所有数据</strong>(可事后下载JSON恢复)。<br>
                         适用场景:从旧版本升级后,需要清除旧的 UNIQUE 约束和测试数据。<br>
                         执行后当前管理员会话会失效,需要重新登录。
                     </div>
-                    <button class="danger" id="resetDbBtn" style="background:#dc2626;color:#fff;border:none;">🗑 重置数据库(清空打卡/设备数据)</button>
+                    <button class="danger" id="resetDbBtn" style="background:#dc2626;color:#fff;border:none;">🗑 重置数据库(清空前自动备份)</button>
+                    <div style="margin-top:12px;border-top:1px dashed #fecaca;padding-top:10px;">
+                        <div style="font-size:12px;color:#6b7280;margin-bottom:6px;font-weight:500;">📦 数据备份</div>
+                        <button class="outline" id="loadBackupsBtn">🔄 刷新备份列表</button>
+                        <div id="backupsList" style="margin-top:8px;font-size:12px;color:#6b7280;">点击上方按钮加载备份列表</div>
+                    </div>
                 </div>
             </div>
 
@@ -325,22 +331,24 @@ async function loadRecords() {
     const records = data.records || [];
 
     // 统计
-    const stats = { total: records.length, normal: 0, abnormal: 0, uniqueUsers: new Set() };
+    const stats = { total: records.length, normal: 0, abnormal: 0, locAbnormal: 0, uniqueUsers: new Set() };
     records.forEach(r => {
         if (r.status === "normal") stats.normal++; else stats.abnormal++;
+        if (r.location_status === "abnormal") stats.locAbnormal++;
         stats.uniqueUsers.add(r.user_code);
     });
     document.getElementById("stats").innerHTML = `
         <div class="stat-card"><div class="stat-num">${stats.total}</div><div class="stat-label">总打卡数</div></div>
         <div class="stat-card"><div class="stat-num">${stats.normal}</div><div class="stat-label">正常</div></div>
-        <div class="stat-card"><div class="stat-num">${stats.abnormal}</div><div class="stat-label">异常</div></div>
+        <div class="stat-card"><div class="stat-num">${stats.abnormal}</div><div class="stat-label">补卡</div></div>
+        <div class="stat-card" style="${stats.locAbnormal > 0 ? 'border-color:#f59e0b;' : ''}"><div class="stat-num" style="${stats.locAbnormal > 0 ? 'color:#f59e0b;' : ''}">${stats.locAbnormal}</div><div class="stat-label">定位异常</div></div>
         <div class="stat-card"><div class="stat-num">${stats.uniqueUsers.size}</div><div class="stat-label">涉及学生数</div></div>
     `;
 
     // 表格
     const body = document.getElementById("recordsBody");
     if (records.length === 0) {
-        body.innerHTML = '<tr><td colspan="9" class="empty">暂无打卡记录</td></tr>';
+        body.innerHTML = '<tr><td colspan="10" class="empty">暂无打卡记录</td></tr>';
         return;
     }
     body.innerHTML = "";
@@ -353,7 +361,8 @@ async function loadRecords() {
             esc(r.dept),
             esc(r.check_type),
             (r.distance || 0).toFixed(1) + "m",
-            `<span class="tag ${r.status === 'normal' ? 'tag-normal' : 'tag-abnormal'}">${r.status === 'normal' ? '正常' : '异常'}</span>`,
+            `<span class="tag ${r.status === 'normal' ? 'tag-normal' : 'tag-abnormal'}">${r.status === 'normal' ? '正常' : '补卡'}</span>`,
+            r.location_status === 'abnormal' ? '<span class="tag tag-abnormal" style="background:#fef3c7;color:#b45309;">异常</span>' : '<span style="color:#d1d5db;">-</span>',
             r.reason ? esc(r.reason) : '<span style="color:#d1d5db;">-</span>',
             esc(r.device_id).slice(0, 8) + "...",
         ];
@@ -368,11 +377,11 @@ async function loadRecords() {
 
 document.getElementById("searchBtn").addEventListener("click", loadRecords);
 
-// ---------- 重置数据库(危险操作) ----------
+// ---------- 重置数据库(危险操作,清空前自动备份) ----------
 document.getElementById("resetDbBtn").addEventListener("click", async () => {
-    const step1 = confirm("⚠ 危险操作\n\n即将清空:\n• 所有打卡记录\n• 所有设备绑定\n• 所有 nonce\n• 所有管理员会话(含当前登录)\n\n保留:\n• NFC 标签白名单\n• 学生白名单\n• 科室位置\n\n确定继续吗?");
+    const step1 = confirm("⚠ 危险操作\n\n即将清空:\n• 所有打卡记录\n• 所有设备绑定\n• 所有 nonce\n• 所有管理员会话(含当前登录)\n\n保留:\n• NFC 标签白名单\n• 学生白名单\n• 科室位置\n\n✓ 清空前会自动备份所有数据(可事后下载JSON)\n\n确定继续吗?");
     if (!step1) return;
-    const step2 = confirm("二次确认:\n\n执行后当前管理员会立即登出,需要重新登录。\n此操作不可恢复!\n\n真的要重置吗?");
+    const step2 = confirm("二次确认:\n\n执行后当前管理员会立即登出,需要重新登录。\n此操作不可恢复(但备份会保留)!\n\n真的要重置吗?");
     if (!step2) return;
     const step3 = prompt("请输入 YES 确认重置(区分大小写):");
     if (step3 !== "YES") { alert("未输入 YES,已取消。"); return; }
@@ -384,6 +393,25 @@ document.getElementById("resetDbBtn").addEventListener("click", async () => {
     localStorage.removeItem("adminToken");
     location.href = "admin.html";
 });
+
+// ---------- 备份管理 ----------
+async function loadBackups() {
+    const { ok, data } = await api("/api/admin/backups");
+    const el = document.getElementById("backupsList");
+    if (!ok) { el.innerHTML = '<span style="color:#dc2626;">加载失败</span>'; return; }
+    const backups = data.backups || [];
+    if (backups.length === 0) { el.innerHTML = '<span style="color:#9ca3af;">暂无备份</span>'; return; }
+    el.innerHTML = backups.map(b => {
+        const time = new Date(b.created_at).toLocaleString("zh-CN");
+        const sizeKB = b.size ? (b.size / 1024).toFixed(1) + "KB" : "";
+        return `<div style="padding:6px 0;border-bottom:1px solid #f3f4f6;">
+            <span>📦 备份 #${b.id}</span>
+            <span style="color:#9ca3af;margin-left:8px;">${time} ${sizeKB}</span>
+            <a href="/api/admin/backups/download?id=${b.id}" target="_blank" style="margin-left:8px;color:#2563eb;">下载</a>
+        </div>`;
+    }).join("");
+}
+document.getElementById("loadBackupsBtn").addEventListener("click", loadBackups);
 
 // ---------- 导出 Excel ----------
 document.getElementById("exportBtn").addEventListener("click", async () => {
@@ -404,7 +432,8 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
         工号: r.user_code,
         科室: r.dept,
         打卡类型: r.check_type,
-        状态: r.status === "normal" ? "正常" : "异常",
+        状态: r.status === "normal" ? "正常" : "补卡",
+        定位状态: r.location_status === "abnormal" ? "定位异常" : "正常",
         补卡原因: r.reason || "",
         距离米: (r.distance || 0).toFixed(1),
         纬度: r.lat,
@@ -472,7 +501,10 @@ async function loadWhitelist() {
             item.className = "list-item";
             item.innerHTML = `<div><strong>${esc(t.uid)}</strong> → ${esc(t.dept)}</div>
                 <div class="list-item-meta">添加于 ${formatTime(t.created_at)}</div>
-                <button class="danger" style="margin-top:6px;padding:4px 10px;font-size:12px;" onclick="deleteWhitelist('nfc','${esc(t.uid)}')">删除</button>`;
+                <div style="margin-top:6px;display:flex;gap:6px;">
+                    <button class="outline" style="padding:4px 10px;font-size:12px;color:#2563eb;border-color:#bfdbfe;" onclick="rotateTag('${esc(t.uid)}','${esc(t.dept)}')">🔄 轮换UID</button>
+                    <button class="danger" style="padding:4px 10px;font-size:12px;" onclick="deleteWhitelist('nfc','${esc(t.uid)}')">删除</button>
+                </div>`;
             nfcEl.appendChild(item);
         });
     }
@@ -518,6 +550,16 @@ window.deleteWhitelist = async function (type, key) {
     if (!confirm(`确认删除 ${type}：${key}？`)) return;
     const { ok, data } = await api("/api/admin/whitelist", { method: "DELETE", body: { type, key } });
     if (!ok) return alert(data.error || "删除失败");
+    loadWhitelist();
+};
+
+// NFC 标签 UID 轮换(防止贴片被复制)
+window.rotateTag = async function (oldUid, dept) {
+    const c1 = confirm(`🔄 NFC 标签 UID 轮换\n\n科室: ${dept}\n旧 UID: ${oldUid}\n\n轮换后:\n• 旧 UID 立即失效,旧 URL 无法再打卡\n• 生成新 UID,需要重新写入 NFC 贴片\n• 已用旧 UID 打卡的记录不受影响\n\n确定轮换吗?`);
+    if (!c1) return;
+    const { ok, data } = await api("/api/admin/rotate-tag", { method: "POST", body: { uid: oldUid } });
+    if (!ok) return alert(data.error || "轮换失败");
+    alert(`轮换成功!\n\n新 UID: ${data.newUid}\n新 URL: ${data.url}\n\n请用 NFC Tools 软件将新 URL 写入贴片:\n1. 打开 NFC Tools\n2. 写 → 添加记录 → 自定义 URL\n3. 粘贴上面的新 URL\n4. 关闭贴片写入`);
     loadWhitelist();
 };
 
