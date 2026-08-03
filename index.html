@@ -103,6 +103,7 @@ const ADMIN_PAGE = "admin.html";
 // ---------- 1. URL 参数校验 ----------
 const urlObj = new URL(window.location.href);
 const tagUid = urlObj.searchParams.get("tagUid");
+const slotCode = urlObj.searchParams.get("code");
 
 if (!tagUid) {
     document.getElementById("errBox").style.display = "block";
@@ -156,7 +157,7 @@ async function bootstrap() {
         const resp = await fetch(API_BASE + "/api/checkin/init", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tagUid, deviceId }),
+            body: JSON.stringify({ tagUid, deviceId, code: slotCode }),
         });
         const data = await resp.json();
         if (!resp.ok) {

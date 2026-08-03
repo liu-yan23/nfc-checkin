@@ -48,6 +48,28 @@ function getIp(req) {
   return req.headers.get('CF-Connecting-IP') || (req.headers.get('X-Forwarded-For') || '').split(',')[0].trim() || 'unknown';
 }
 
+// 生成每时段动态码:HMAC(tagUid + 日期 + 时段, SECRET_KEY)
+// 复制URL跨时段/跨天使用时,code不匹配,服务端拒绝
+async function getSlotCode(tagUid, ts, env) {
+  var d = new Date(ts + 8 * 3600 * 1000);
+  var dateStr = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+  var ct = getCheckType(ts);
+  var slotKey = dateStr + '|' + ct.type + '|' + ct.status;
+  var secret = (env.SECRET_KEY || 'default-secret-key-change-me') + '|' + tagUid;
+  var data = new TextEncoder().encode(slotKey);
+  var key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  var sig = await crypto.subtle.sign('HMAC', key, data);
+  var arr = Array.from(new Uint8Array(sig));
+  return arr.slice(0, 8).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+}
+
+// 校验动态码
+async function verifySlotCode(tagUid, ts, code, env) {
+  if (!code) return false;
+  var expected = await getSlotCode(tagUid, ts, env);
+  return code === expected;
+}
+
 export async function onRequest(context) {
   var req = context.request, env = context.env;
   var url = new URL(req.url);
@@ -55,6 +77,19 @@ export async function onRequest(context) {
   var method = req.method;
 
   if (method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders() });
+
+  // /go 动态跳转路由:NFC贴片写入此URL,服务端自动跳转到带动态码的打卡页
+  if (path === '/go' && method === 'GET') {
+    var tagParam = url.searchParams.get('tag');
+    if (!tagParam) return json({ error: '缺少 tag 参数' }, 400);
+    var tagUid = String(tagParam).toLowerCase().trim();
+    var tagRow = await env.DB.prepare('SELECT uid, dept FROM nfc_tags WHERE uid = ?').bind(tagUid).first();
+    if (!tagRow) return json({ error: 'NFC 标签未注册' }, 403);
+    var now = Date.now();
+    var code = await getSlotCode(tagUid, now, env);
+    var redirectUrl = '/index.html?tagUid=' + encodeURIComponent(tagUid) + '&code=' + code;
+    return new Response(null, { status: 302, headers: { 'Location': redirectUrl, 'Cache-Control': 'no-store' } });
+  }
 
   // 数据库懒初始化
   try { await env.DB.prepare('SELECT 1 FROM checkins LIMIT 1').run(); } catch (e) { await initDb(env); }
@@ -153,15 +188,17 @@ async function handleCheckinInit(req, env) {
   var uid = String(body.tagUid).toLowerCase().trim();
   var tag = await env.DB.prepare('SELECT uid, dept FROM nfc_tags WHERE uid = ?').bind(uid).first();
   if (!tag) { await audit(env, 'nfc_invalid', '非法 UID: ' + uid, body.deviceId, getIp(req)); return json({ error: 'NFC 标签未注册，访问拒绝' }, 403); }
-  // 纵深防御:非打卡时段拒绝页面初始化,防止书签 URL 滥用
+  // 纵深防御:校验动态码,防止复制旧URL跨时段使用
   var now = Date.now();
-  var ct = getCheckType(now);
-  if (ct.status === 'abnormal' && ct.type === '夜班' && ct.crossDay) {
-    // 00:00-06:59 夜班补卡,允许初始化
-  } else if (ct.status === 'abnormal' && ct.type === '上午上班') {
-    // 08:03-11:29 上午上班补卡,允许初始化
-  } else if (ct.status === 'abnormal' && ct.type === '下午上班') {
-    // 14:03-16:59 下午上班补卡,允许初始化
+  if (body.code) {
+    var codeOk = await verifySlotCode(uid, now, body.code, env);
+    if (!codeOk) {
+      await audit(env, 'code_invalid', '动态码校验失败 UID=' + uid + ' code=' + body.code, body.deviceId, getIp(req));
+      return json({ error: '打卡链接已过期，请重新触碰 NFC 标签获取新链接' }, 403);
+    }
+  } else {
+    // 没有code,说明是直接访问 index.html 而非通过 /go 跳转
+    return json({ error: '请通过触碰 NFC 标签进入打卡页面' }, 403);
   }
   // 设备绑定说明:
   //   - NFC 贴片是科室共用,任何设备都可以扫任意贴片,不在此处限制

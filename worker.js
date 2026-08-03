@@ -122,6 +122,28 @@ function getClientIp(request) {
          'unknown';
 }
 
+// 生成每时段动态码:HMAC(tagUid + 日期 + 时段, SECRET_KEY)
+// 复制URL跨时段/跨天使用时,code不匹配,服务端拒绝
+async function getSlotCode(tagUid, ts, env) {
+  const d = new Date(ts + 8 * 3600 * 1000);
+  const dateStr = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+  const ct = getCheckType(ts);
+  const slotKey = dateStr + '|' + ct.type + '|' + ct.status;
+  const secret = (env.SECRET_KEY || 'default-secret-key-change-me') + '|' + tagUid;
+  const data = new TextEncoder().encode(slotKey);
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, data);
+  const arr = Array.from(new Uint8Array(sig));
+  return arr.slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// 校验动态码
+async function verifySlotCode(tagUid, ts, code, env) {
+  if (!code) return false;
+  const expected = await getSlotCode(tagUid, ts, env);
+  return code === expected;
+}
+
 // ============== 路由分发 ==============
 
 export default {
@@ -133,6 +155,19 @@ export default {
     // 处理 CORS 预检
     if (method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(env) });
+    }
+
+    // /go 动态跳转路由:NFC贴片写入此URL,服务端自动跳转到带动态码的打卡页
+    if (path === '/go' && method === 'GET') {
+      const tagParam = url.searchParams.get('tag');
+      if (!tagParam) return json({ error: '缺少 tag 参数' }, 400, env);
+      const tagUid = String(tagParam).toLowerCase().trim();
+      const tagRow = await env.DB.prepare('SELECT uid, dept FROM nfc_tags WHERE uid = ?').bind(tagUid).first();
+      if (!tagRow) return json({ error: 'NFC 标签未注册' }, 403, env);
+      const now = Date.now();
+      const code = await getSlotCode(tagUid, now, env);
+      const redirectUrl = '/index.html?tagUid=' + encodeURIComponent(tagUid) + '&code=' + code;
+      return new Response(null, { status: 302, headers: { 'Location': redirectUrl, 'Cache-Control': 'no-store' } });
     }
 
     // 数据库懒初始化（首次部署或重置后自动建表）
@@ -348,7 +383,8 @@ async function handleAdminLogin(request, env) {
 
 // NFC 进入 → 校验 + 生成 nonce
 async function handleCheckinInit(request, env) {
-  const { tagUid, deviceId } = await request.json();
+  const body = await request.json();
+  const { tagUid, deviceId } = body;
   if (!tagUid || !deviceId) {
     return json({ error: '参数缺失' }, 400, env);
   }
@@ -363,6 +399,19 @@ async function handleCheckinInit(request, env) {
     return json({ error: 'NFC 标签未注册，访问拒绝' }, 403, env);
   }
 
+  // 纵深防御:校验动态码,防止复制旧URL跨时段使用
+  const now = Date.now();
+  if (body.code) {
+    const codeOk = await verifySlotCode(uid, now, body.code, env);
+    if (!codeOk) {
+      await audit(env, 'code_invalid', `动态码校验失败 UID=${uid} code=${body.code}`, deviceId, getClientIp(request));
+      return json({ error: '打卡链接已过期，请重新触碰 NFC 标签获取新链接' }, 403, env);
+    }
+  } else {
+    // 没有code,说明是直接访问 index.html 而非通过 /go 跳转
+    return json({ error: '请通过触碰 NFC 标签进入打卡页面' }, 403, env);
+  }
+
   // 设备绑定说明:
   //   - NFC 贴片是科室共用,任何设备都可以扫任意贴片,不在此处限制
   //   - 设备↔工号 的绑定限制在 handleCheckinSubmit 中检查(首次提交工号时绑定)
@@ -370,13 +419,6 @@ async function handleCheckinInit(request, env) {
   const bind = await env.DB.prepare(
     'SELECT tag_uid, user_code FROM device_binds WHERE device_id = ?'
   ).bind(deviceId).first();
-
-  // 纵深防御:非打卡时段拒绝页面初始化,防止书签 URL 滥用
-  const now = Date.now();
-  const ct = getCheckType(now);
-  // 允许补卡时段初始化(上午上班补卡/下午上班补卡/夜班补卡均允许)
-  // 正常时段总是允许;补卡时段也允许(因为系统支持补卡)
-  // 非打卡时段:理论上所有时段都允许打卡(正常+补卡覆盖24小时),所以不做额外拒绝
 
   // 生成 nonce（120 秒有效,纵深防御:防止书签 URL 长时间有效）
   const nonce = randomToken(24);
