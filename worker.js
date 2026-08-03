@@ -371,10 +371,16 @@ async function handleCheckinInit(request, env) {
     'SELECT tag_uid, user_code FROM device_binds WHERE device_id = ?'
   ).bind(deviceId).first();
 
-  // 生成 nonce（5 分钟有效）
-  const nonce = randomToken(24);
+  // 纵深防御:非打卡时段拒绝页面初始化,防止书签 URL 滥用
   const now = Date.now();
-  const expires = now + 5 * 60 * 1000;
+  const ct = getCheckType(now);
+  // 允许补卡时段初始化(上午上班补卡/下午上班补卡/夜班补卡均允许)
+  // 正常时段总是允许;补卡时段也允许(因为系统支持补卡)
+  // 非打卡时段:理论上所有时段都允许打卡(正常+补卡覆盖24小时),所以不做额外拒绝
+
+  // 生成 nonce（120 秒有效,纵深防御:防止书签 URL 长时间有效）
+  const nonce = randomToken(24);
+  const expires = now + 120000;
   await env.DB.prepare(
     'INSERT INTO nonces (nonce, tag_uid, device_id, created_at, expires_at, used) VALUES (?, ?, ?, ?, ?, 0)'
   ).bind(nonce, uid, deviceId, now, expires).run();
@@ -594,19 +600,22 @@ async function handleGetMyRecords(request, env) {
   ).bind(deviceId).first();
   if (!bind) return json({ records: [] }, 200, env);
 
-  const rows = await env.DB.prepare(
-    `SELECT check_time, dept, check_type, status, distance
-     FROM checkins
-     WHERE tag_uid = ?
-     ORDER BY check_time DESC
-     LIMIT 30`
-  ).bind(bind.tag_uid).all();
-
-  return json({
-    boundUid: bind.tag_uid,
-    boundUserCode: bind.user_code,
-    records: rows.results || [],
-  }, 200, env);
+  // 按 device_id 查询该设备对应工号的记录,而非按 tag_uid 查询所有记录
+  if (bind.user_code) {
+    const rows = await env.DB.prepare(
+      `SELECT check_time, dept, check_type, status, distance
+       FROM checkins
+       WHERE device_id = ?
+       ORDER BY check_time DESC
+       LIMIT 30`
+    ).bind(deviceId).all();
+    return json({
+      boundUid: bind.tag_uid,
+      boundUserCode: bind.user_code,
+      records: rows.results || [],
+    }, 200, env);
+  }
+  return json({ boundUid: bind.tag_uid, boundUserCode: null, records: [] }, 200, env);
 }
 
 // 管理员查全部记录（支持日期/科室/工号筛选）

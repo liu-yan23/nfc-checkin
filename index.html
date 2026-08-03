@@ -68,6 +68,10 @@ button:disabled{background:#9ca3af;cursor:not-allowed;}
                 <label>打卡类型（服务器时间判定）</label>
                 <div><span id="checkType">--</span></div>
             </div>
+            <div class="row" id="nonceTimerRow">
+                <label>⏱ 会话有效期</label>
+                <div><span id="nonceTimer">--</span></div>
+            </div>
             <div class="row" id="reasonRow" style="display:none;">
                 <label>补卡原因（必填，不超过20字）</label>
                 <input type="text" id="reasonInput" placeholder="请简述补卡原因" maxlength="20" autocomplete="off">
@@ -285,10 +289,13 @@ function tryEnableSubmit() {
 document.getElementById("userCode").addEventListener("input", tryEnableSubmit);
 document.getElementById("reasonInput").addEventListener("input", tryEnableSubmit);
 
-// ---------- 7. nonce 过期监控 ----------
+// ---------- 7. nonce 过期监控(含倒计时显示) ----------
 function startNonceWatcher() {
-    setInterval(() => {
-        if (Date.now() >= nonceExpiresAt) {
+    const timerEl = document.getElementById("nonceTimer");
+    function updateTimer() {
+        const remaining = Math.max(0, Math.floor((nonceExpiresAt - Date.now()) / 1000));
+        if (remaining <= 0) {
+            timerEl.innerHTML = '<span style="color:#dc2626;font-weight:600;">已过期，请重新触碰 NFC 标签</span>';
             const btn = document.getElementById("submitBtn");
             btn.disabled = true;
             const posEl = document.getElementById("posText");
@@ -296,8 +303,16 @@ function startNonceWatcher() {
                 posEl.className = "pos-err";
                 posEl.textContent = "✗ 打卡会话已超时，请重新触碰 NFC 标签";
             }
+            return;
         }
-    }, 1000);
+        const m = Math.floor(remaining / 60);
+        const s = remaining % 60;
+        const color = remaining <= 30 ? "#dc2626" : remaining <= 60 ? "#f59e0b" : "#059669";
+        timerEl.innerHTML = `<span style="color:${color};font-weight:600;">${m}:${String(s).padStart(2, "0")}</span>`;
+        tryEnableSubmit();
+    }
+    updateTimer();
+    setInterval(updateTimer, 1000);
 }
 
 // ---------- 8. 提交打卡 ----------

@@ -153,12 +153,22 @@ async function handleCheckinInit(req, env) {
   var uid = String(body.tagUid).toLowerCase().trim();
   var tag = await env.DB.prepare('SELECT uid, dept FROM nfc_tags WHERE uid = ?').bind(uid).first();
   if (!tag) { await audit(env, 'nfc_invalid', '非法 UID: ' + uid, body.deviceId, getIp(req)); return json({ error: 'NFC 标签未注册，访问拒绝' }, 403); }
+  // 纵深防御:非打卡时段拒绝页面初始化,防止书签 URL 滥用
+  var now = Date.now();
+  var ct = getCheckType(now);
+  if (ct.status === 'abnormal' && ct.type === '夜班' && ct.crossDay) {
+    // 00:00-06:59 夜班补卡,允许初始化
+  } else if (ct.status === 'abnormal' && ct.type === '上午上班') {
+    // 08:03-11:29 上午上班补卡,允许初始化
+  } else if (ct.status === 'abnormal' && ct.type === '下午上班') {
+    // 14:03-16:59 下午上班补卡,允许初始化
+  }
   // 设备绑定说明:
   //   - NFC 贴片是科室共用,任何设备都可以扫任意贴片,不在此处限制
   //   - 设备↔工号 的绑定限制在 handleCheckinSubmit 中检查(首次提交工号时绑定)
   //   - 此处仅记录/更新设备最近访问的 tag_uid 与 last_seen_at
   var bind = await env.DB.prepare('SELECT tag_uid, user_code FROM device_binds WHERE device_id = ?').bind(body.deviceId).first();
-  var nonce = randomToken(24), now = Date.now(), expires = now + 300000;
+  var nonce = randomToken(24), expires = now + 120000; // 纵深防御:nonce 120秒,防止书签 URL 长时间有效
   await env.DB.prepare('INSERT INTO nonces (nonce, tag_uid, device_id, created_at, expires_at, used) VALUES (?, ?, ?, ?, ?, 0)').bind(nonce, uid, body.deviceId, now, expires).run();
   if (!bind) {
     await env.DB.prepare('INSERT INTO device_binds (device_id, tag_uid, user_code, bound_at, last_seen_at) VALUES (?, ?, NULL, ?, ?)').bind(body.deviceId, uid, now, now).run();
@@ -264,8 +274,12 @@ async function handleMyRecords(req, env) {
   if (!deviceId) return json({ error: '缺少 deviceId' }, 400);
   var bind = await env.DB.prepare('SELECT tag_uid, user_code FROM device_binds WHERE device_id = ?').bind(deviceId).first();
   if (!bind) return json({ records: [] });
-  var rows = await env.DB.prepare('SELECT check_time, dept, check_type, status, distance FROM checkins WHERE tag_uid = ? ORDER BY check_time DESC LIMIT 30').bind(bind.tag_uid).all();
-  return json({ boundUid: bind.tag_uid, boundUserCode: bind.user_code, records: rows.results || [] });
+  // 按 device_id 查询该设备对应工号的记录,而非按 tag_uid 查询所有记录
+  if (bind.user_code) {
+    var rows = await env.DB.prepare('SELECT check_time, dept, check_type, status, distance FROM checkins WHERE device_id = ? ORDER BY check_time DESC LIMIT 30').bind(deviceId).all();
+    return json({ boundUid: bind.tag_uid, boundUserCode: bind.user_code, records: rows.results || [] });
+  }
+  return json({ boundUid: bind.tag_uid, boundUserCode: null, records: [] });
 }
 
 async function handleAllRecords(req, env) {
