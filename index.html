@@ -101,17 +101,25 @@ const ADMIN_PAGE = "admin.html";
 // =======================================================
 
 // ---------- 1. URL 参数校验 ----------
-const urlObj = new URL(window.location.href);
-const tagUid = urlObj.searchParams.get("tagUid");
-const slotCode = urlObj.searchParams.get("code");
+var urlObj = new URL(window.location.href);
+var tagUid = urlObj.searchParams.get("tagUid");
+var slotCode = urlObj.searchParams.get("code");
+
+// ★ 核心防护:读取 code 后立即从 URL 中移除,并替换历史记录
+// 效果:用户刷新页面时 URL 没有 code → init 接口拒绝 → 无法打卡
+// 即使用户手动返回/刷新,也无法绕过后端 code 校验
+if (slotCode) {
+    urlObj.searchParams.delete("code");
+    history.replaceState(null, "", urlObj.toString());
+}
 
 // 前端防返回:打卡成功后刷新/返回直接跳完成页
 // 后端已有唯一索引兜底,此处仅为优化用户体验
-const punchFlag = "punch_done_" + tagUid + "_" + new Date().toDateString();
+var punchFlag = "punch_done_" + tagUid + "_" + new Date().toDateString();
 if (sessionStorage.getItem(punchFlag)) {
     // 本设备本标签今日已打卡,跳转到完成页
     window.location.replace(DONE_PAGE + "?r=" + sessionStorage.getItem(punchFlag));
-} else {
+} else if (tagUid) {
     // 锁住返回键,防止返回到上一个页面重新打卡
     history.pushState(null, document.title, location.href);
     window.addEventListener('popstate', function () {

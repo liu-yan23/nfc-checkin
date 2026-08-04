@@ -200,6 +200,15 @@ async function handleCheckinInit(req, env) {
     // 没有code,说明是直接访问 index.html 而非通过 /go 跳转
     return json({ error: '请通过触碰 NFC 标签进入打卡页面' }, 403);
   }
+  // 防代码复用:如果该设备已在此科室打过当天同一类型的卡,拒绝发 nonce
+  // 这会阻止"刷新页面获取新 nonce 再次打卡"的攻击
+  var ct = getCheckType(now);
+  var dateStr = new Date(now + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  var alreadyChecked = await env.DB.prepare('SELECT 1 FROM checkins WHERE device_id = ? AND tag_uid = ? AND checkin_date = ? AND check_type = ? LIMIT 1').bind(body.deviceId, uid, dateStr, ct.type).first();
+  if (alreadyChecked) {
+    await audit(env, 'code_reuse', '设备已打卡,尝试复用 code UID=' + uid + ' 类型=' + ct.type, body.deviceId, getIp(req));
+    return json({ error: '该设备今日已在此科室打过此类型卡，请勿重复打卡，如需打卡请重新触碰 NFC 标签' }, 409);
+  }
   // 设备绑定说明:
   //   - NFC 贴片是科室共用,任何设备都可以扫任意贴片,不在此处限制
   //   - 设备↔工号 的绑定限制在 handleCheckinSubmit 中检查(首次提交工号时绑定)
