@@ -41,6 +41,13 @@ const API_BASE = "";
 const urlObj = new URL(window.location.href);
 const r = urlObj.searchParams.get("r");
 
+// 锁住返回键:打卡完成后不允许返回到填表页
+history.pushState(null, document.title, location.href);
+window.addEventListener('popstate', function () {
+    history.pushState(null, document.title, location.href);
+    alert("打卡已完成，如需再次打卡请重新触碰 NFC 标签");
+});
+
 const content = document.getElementById("content");
 
 if (!r) {
