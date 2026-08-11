@@ -53,6 +53,44 @@ tr:hover{background:#f9fafb;}
 .list-item{background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:10px 12px;}
 .list-item-meta{font-size:12px;color:#6b7280;margin-top:4px;}
 .empty{text-align:center;padding:30px;color:#9ca3af;font-size:14px;}
+
+/* ========== 导出弹窗 ========== */
+.modal-mask{
+  position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100;
+  display:flex;align-items:center;justify-content:center;padding:20px;
+}
+.modal-box{
+  background:#fff;border-radius:12px;width:100%;max-width:560px;
+  box-shadow:0 20px 60px rgba(0,0,0,.2);overflow:hidden;
+  animation:modalIn .2s ease;
+}
+@keyframes modalIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.modal-head{
+  padding:16px 22px;border-bottom:1px solid #e5e7eb;
+  display:flex;align-items:center;justify-content:space-between;
+}
+.modal-title{font-size:17px;font-weight:700;color:#111827;display:flex;align-items:center;gap:8px;}
+.modal-close{
+  width:30px;height:30px;border:none;background:#f3f4f6;border-radius:6px;
+  cursor:pointer;color:#6b7280;font-size:18px;line-height:1;
+}
+.modal-close:hover{background:#e5e7eb;color:#111827;}
+.modal-body{padding:20px 22px;max-height:70vh;overflow-y:auto;}
+.modal-foot{
+  padding:14px 22px;border-top:1px solid #e5e7eb;display:flex;gap:10px;justify-content:flex-end;
+  background:#f9fafb;
+}
+.export-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.export-grid .full{grid-column:1/-1;}
+.export-hint{
+  background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;
+  padding:10px 14px;border-radius:8px;font-size:13px;line-height:1.6;margin-bottom:16px;
+}
+.export-preview{
+  margin-top:6px;padding:10px 12px;background:#f9fafb;border:1px dashed #e5e7eb;
+  border-radius:6px;font-size:12px;color:#6b7280;min-height:38px;display:flex;align-items:center;
+}
+.export-preview strong{color:#2563eb;margin:0 3px;}
 </style>
 </head>
 <body>
@@ -236,6 +274,84 @@ tr:hover{background:#f9fafb;}
     </div>
 </div>
 
+<!-- ========== 导出筛选弹窗 ========== -->
+<div id="exportModal" style="display:none;">
+  <div class="modal-mask" onclick="if(event.target===this)closeExportModal()">
+    <div class="modal-box">
+      <div class="modal-head">
+        <div class="modal-title">📥 导出打卡记录 - 筛选条件</div>
+        <button class="modal-close" onclick="closeExportModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="export-hint">
+          💡 请选择您要导出的范围：<br>
+          • 不填即代表「全部」<br>
+          • 所有条件同时生效（AND 关系）
+        </div>
+        <div class="export-grid">
+          <div>
+            <label>开始日期</label>
+            <input type="date" id="expStartDate">
+          </div>
+          <div>
+            <label>结束日期</label>
+            <input type="date" id="expEndDate">
+          </div>
+          <div>
+            <label>科室</label>
+            <select id="expDept"><option value="">全部科室</option></select>
+          </div>
+          <div>
+            <label>工号</label>
+            <input type="text" id="expUserCode" placeholder="不填=全部">
+          </div>
+          <div>
+            <label>打卡类型</label>
+            <select id="expCheckType">
+              <option value="">全部类型</option>
+              <option value="上午上班">上午上班</option>
+              <option value="上午下班">上午下班</option>
+              <option value="下午上班">下午上班</option>
+              <option value="下午下班">下午下班</option>
+              <option value="夜班">夜班</option>
+            </select>
+          </div>
+          <div>
+            <label>打卡状态</label>
+            <select id="expStatus">
+              <option value="">全部状态</option>
+              <option value="normal">仅正常打卡</option>
+              <option value="abnormal">仅补卡/迟到</option>
+            </select>
+          </div>
+          <div class="full">
+            <label>定位状态</label>
+            <select id="expLocStatus">
+              <option value="">全部</option>
+              <option value="normal">仅定位正常</option>
+              <option value="abnormal">仅定位异常</option>
+            </select>
+          </div>
+          <div class="full">
+            <label>&nbsp;</label>
+            <div class="export-preview" id="exportPreview">
+              🎯 当前：导出 <strong>全部</strong> 打卡记录
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="outline" onclick="fillExportToday()">今天</button>
+        <button class="outline" onclick="fillExportThisWeek()">本周</button>
+        <button class="outline" onclick="fillExportThisMonth()">本月</button>
+        <button class="outline" onclick="resetExportFilter()">重置</button>
+        <button class="outline" onclick="closeExportModal()">取消</button>
+        <button id="confirmExportBtn" onclick="doExportWithFilter()">📥 确认导出</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 // =====================【部署配置】=====================
 // 前后端部署在同一 Cloudflare Pages 域名下，使用相对路径即可
@@ -413,42 +529,166 @@ async function loadBackups() {
 }
 document.getElementById("loadBackupsBtn").addEventListener("click", loadBackups);
 
-// ---------- 导出 Excel ----------
-document.getElementById("exportBtn").addEventListener("click", async () => {
-    const startDate = document.getElementById("startDate").value;
-    const endDate = document.getElementById("endDate").value;
-    const dept = document.getElementById("filterDept").value;
-    const userCode = document.getElementById("filterUserCode").value.trim();
-    const params = new URLSearchParams();
-    if (startDate) params.set("startDate", startDate);
-    if (endDate) params.set("endDate", endDate);
-    if (dept) params.set("dept", dept);
-    if (userCode) params.set("userCode", userCode);
-    const { ok, data } = await api("/api/records/all?" + params.toString());
-    if (!ok) return alert(data.error || "导出失败");
-    const records = (data.records || []).map(r => ({
-        打卡时间: formatTime(r.check_time),
-        姓名: r.user_name,
-        工号: r.user_code,
-        科室: r.dept,
-        打卡类型: r.check_type,
-        状态: r.status === "normal" ? "正常" : "补卡",
-        定位状态: r.location_status === "abnormal" ? "定位异常" : "正常",
-        补卡原因: r.reason || "",
-        距离米: (r.distance || 0).toFixed(1),
-        纬度: r.lat,
-        经度: r.lng,
-        设备ID: r.device_id,
-        IP: r.ip || "",
-    }));
-    if (records.length === 0) return alert("无数据可导出");
-    const ws = XLSX.utils.json_to_sheet(records);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "打卡记录");
-    const buf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-    const blob = new Blob([buf], { type: "application/octet-stream" });
-    saveAs(blob, `打卡数据_${startDate || '全部'}_${endDate || '全部'}.xlsx`);
+// ---------- 导出 Excel (新版：弹窗筛选) ----------
+document.getElementById("exportBtn").addEventListener("click", () => {
+    openExportModal();
 });
+
+// 填充导出弹窗的科室下拉（在 loadWhitelist 中已拿到 depts，在此复用）
+function refreshExportDeptOptions(depts) {
+    const sel = document.getElementById("expDept");
+    if (!sel) return;
+    sel.innerHTML = '<option value="">全部科室</option>';
+    (depts || []).forEach(d => {
+        const opt = document.createElement("option");
+        opt.value = d.dept; opt.textContent = d.dept;
+        sel.appendChild(opt);
+    });
+}
+
+function openExportModal() {
+    // 默认带入当前查询栏中的筛选条件
+    const curStart = document.getElementById("startDate").value;
+    const curEnd = document.getElementById("endDate").value;
+    const curDept = document.getElementById("filterDept").value;
+    const curUser = document.getElementById("filterUserCode").value.trim();
+    document.getElementById("expStartDate").value = curStart;
+    document.getElementById("expEndDate").value = curEnd;
+    document.getElementById("expDept").value = curDept || "";
+    document.getElementById("expUserCode").value = curUser;
+    document.getElementById("expCheckType").value = "";
+    document.getElementById("expStatus").value = "";
+    document.getElementById("expLocStatus").value = "";
+    updateExportPreview();
+    document.getElementById("exportModal").style.display = "block";
+}
+function closeExportModal() {
+    document.getElementById("exportModal").style.display = "none";
+}
+// 便捷时间按钮
+function formatDateInput(d) {
+    const p = n => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
+}
+function fillExportToday() {
+    const now = new Date(Date.now() + 8*3600*1000);
+    const s = formatDateInput(new Date(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    document.getElementById("expStartDate").value = s;
+    document.getElementById("expEndDate").value = s;
+    updateExportPreview();
+}
+function fillExportThisWeek() {
+    const now = new Date(Date.now() + 8*3600*1000);
+    const y = now.getUTCFullYear(), m = now.getUTCMonth(), d = now.getUTCDate();
+    const day = (now.getUTCDay() + 6) % 7; // 中国周一为一周开始
+    const start = new Date(y, m, d - day);
+    const end = new Date(y, m, d - day + 6);
+    document.getElementById("expStartDate").value = formatDateInput(start);
+    document.getElementById("expEndDate").value = formatDateInput(end);
+    updateExportPreview();
+}
+function fillExportThisMonth() {
+    const now = new Date(Date.now() + 8*3600*1000);
+    const y = now.getUTCFullYear(), m = now.getUTCMonth();
+    const start = new Date(y, m, 1);
+    const end = new Date(y, m + 1, 0);
+    document.getElementById("expStartDate").value = formatDateInput(start);
+    document.getElementById("expEndDate").value = formatDateInput(end);
+    updateExportPreview();
+}
+function resetExportFilter() {
+    ["expStartDate","expEndDate","expDept","expUserCode","expCheckType","expStatus","expLocStatus"]
+        .forEach(id => document.getElementById(id).value = "");
+    updateExportPreview();
+}
+// 预览文字更新
+function updateExportPreview() {
+    const s = document.getElementById("expStartDate").value;
+    const e = document.getElementById("expEndDate").value;
+    const dept = document.getElementById("expDept").value;
+    const user = document.getElementById("expUserCode").value.trim();
+    const ct = document.getElementById("expCheckType").value;
+    const st = document.getElementById("expStatus").value;
+    const ls = document.getElementById("expLocStatus").value;
+    const parts = [];
+    parts.push(`日期：<strong>${s || '开始不限'}</strong> 至 <strong>${e || '结束不限'}</strong>`);
+    if (dept) parts.push(`科室=<strong>${dept}</strong>`);
+    if (user) parts.push(`工号=<strong>${user}</strong>`);
+    if (ct) parts.push(`类型=<strong>${ct}</strong>`);
+    if (st) parts.push(`状态=<strong>${st === 'normal' ? '正常' : '补卡'}</strong>`);
+    if (ls) parts.push(`定位=<strong>${ls === 'normal' ? '正常' : '异常'}</strong>`);
+    document.getElementById("exportPreview").innerHTML = "🎯 " + parts.join(" &nbsp;·&nbsp; ");
+}
+// 所有筛选字段变化时更新预览
+["expStartDate","expEndDate","expDept","expUserCode","expCheckType","expStatus","expLocStatus"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("input", updateExportPreview);
+    if (el) el.addEventListener("change", updateExportPreview);
+});
+
+// 执行按筛选条件导出
+async function doExportWithFilter() {
+    const btn = document.getElementById("confirmExportBtn");
+    const origText = btn.textContent;
+    btn.disabled = true; btn.textContent = "导出中…";
+    try {
+        const startDate = document.getElementById("expStartDate").value;
+        const endDate = document.getElementById("expEndDate").value;
+        const dept = document.getElementById("expDept").value;
+        const userCode = document.getElementById("expUserCode").value.trim();
+        const checkType = document.getElementById("expCheckType").value;
+        const status = document.getElementById("expStatus").value;
+        const locStatus = document.getElementById("expLocStatus").value;
+
+        // 后端支持: startDate/endDate/dept/userCode → 先发请求粗筛
+        const params = new URLSearchParams();
+        if (startDate) params.set("startDate", startDate);
+        if (endDate) params.set("endDate", endDate);
+        if (dept) params.set("dept", dept);
+        if (userCode) params.set("userCode", userCode);
+        const { ok, data } = await api("/api/records/all?" + params.toString());
+        if (!ok) return alert(data.error || "导出失败");
+
+        // 前端二次精筛 (checkType / status / locStatus)
+        let records = (data.records || []).slice();
+        if (checkType) records = records.filter(r => r.check_type === checkType);
+        if (status) records = records.filter(r => r.status === status);
+        if (locStatus) records = records.filter(r => (r.location_status || "normal") === locStatus);
+
+        if (records.length === 0) return alert("符合筛选条件的数据为空，请调整条件后再试。");
+
+        const rows = records.map(r => ({
+            打卡时间: formatTime(r.check_time),
+            姓名: r.user_name,
+            工号: r.user_code,
+            科室: r.dept,
+            打卡类型: r.check_type,
+            状态: r.status === "normal" ? "正常" : "补卡",
+            定位状态: r.location_status === "abnormal" ? "定位异常" : "正常",
+            补卡原因: r.reason || "",
+            距离米: (r.distance || 0).toFixed(1),
+            纬度: r.lat,
+            经度: r.lng,
+            设备ID: r.device_id,
+            IP: r.ip || "",
+        }));
+        const ws = XLSX.utils.json_to_sheet(rows);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "打卡记录");
+        const buf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+        const blob = new Blob([buf], { type: "application/octet-stream" });
+        const namePart = [
+            startDate || '全部',
+            endDate || '全部',
+            dept ? `_${dept}` : '',
+            userCode ? `_工号${userCode}` : '',
+        ].join("");
+        saveAs(blob, `打卡数据_${namePart}.xlsx`);
+        closeExportModal();
+    } finally {
+        btn.disabled = false; btn.textContent = origText;
+    }
+}
 
 // ---------- 设备管理 ----------
 async function loadDevices() {
@@ -525,7 +765,7 @@ async function loadWhitelist() {
     // 科室
     const deptEl = document.getElementById("deptList");
     const depts = data.depts || [];
-    // 同时更新筛选下拉
+    // 同时更新筛选下拉（查询栏 + 导出弹窗）
     const filterDept = document.getElementById("filterDept");
     filterDept.innerHTML = '<option value="">全部</option>';
     depts.forEach(d => {
@@ -533,6 +773,7 @@ async function loadWhitelist() {
         opt.value = d.dept; opt.textContent = d.dept;
         filterDept.appendChild(opt);
     });
+    refreshExportDeptOptions(depts);
     if (depts.length === 0) deptEl.innerHTML = '<div class="empty">暂无科室配置</div>';
     else {
         deptEl.innerHTML = "";
