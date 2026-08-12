@@ -94,6 +94,10 @@ export async function onRequest(context) {
   // 数据库懒初始化
   try { await env.DB.prepare('SELECT 1 FROM checkins LIMIT 1').run(); } catch (e) { await initDb(env); }
 
+  // 向前兼容迁移：确保新字段存在（initDb 只在表不存在时运行，所以单独检查）
+  try { await env.DB.prepare('SELECT requires_note FROM nfc_tags LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE nfc_tags ADD COLUMN requires_note INTEGER DEFAULT 0').catch(function(){}); }
+  try { await env.DB.prepare('SELECT note FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN note TEXT').catch(function(){}); }
+
   try {
     // 公开接口
     if (path === '/api/health' && method === 'GET') return json({ ok: true, time: Date.now() });
