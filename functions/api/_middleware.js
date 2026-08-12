@@ -194,7 +194,7 @@ async function handleCheckinInit(req, env) {
   var body = await req.json();
   if (!body.tagUid || !body.deviceId) return json({ error: '参数缺失' }, 400);
   var uid = String(body.tagUid).toLowerCase().trim();
-  var tag = await env.DB.prepare('SELECT uid, dept FROM nfc_tags WHERE uid = ?').bind(uid).first();
+  var tag = await env.DB.prepare('SELECT uid, dept, requires_note FROM nfc_tags WHERE uid = ?').bind(uid).first();
   if (!tag) { await audit(env, 'nfc_invalid', '非法 UID: ' + uid, body.deviceId, getIp(req)); return json({ error: 'NFC 标签未注册，访问拒绝' }, 403); }
   // 纵深防御:校验动态码,防止复制旧URL跨时段使用
   var now = Date.now();
