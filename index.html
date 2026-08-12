@@ -47,6 +47,7 @@ button:disabled{background:#9ca3af;cursor:not-allowed;}
         <div style="font-size:18px;font-weight:600;">访问拒绝</div>
         <div id="errMsg" style="margin-top:8px;font-size:14px;">必须触碰科室NFC标签进入系统，禁止手动输入链接或收藏访问。</div>
         <div id="errSub" style="margin-top:4px;font-size:13px;color:#7f1d1d;"></div>
+        <div style="margin-top:10px;font-size:12px;color:#6b7280;">如有疑问请联系管理员（儿科学教研室 刘妍）</div>
     </div>
 
     <div id="mainBox" class="main-box">
@@ -75,6 +76,10 @@ button:disabled{background:#9ca3af;cursor:not-allowed;}
             <div class="row" id="reasonRow" style="display:none;">
                 <label>补卡原因（必填，不超过20字）</label>
                 <input type="text" id="reasonInput" placeholder="请简述补卡原因" maxlength="20" autocomplete="off">
+            </div>
+            <div class="row" id="noteRow" style="display:none;">
+                <label>📝 备注原因（必填，不超过100字）</label>
+                <input type="text" id="noteInput" placeholder="如：参加出科考核等特殊情况说明" maxlength="100" autocomplete="off">
             </div>
             <button id="submitBtn" disabled>提交打卡</button>
         </div>
@@ -199,6 +204,10 @@ async function bootstrap() {
         if (isAbnormalSlot(serverTime)) {
             document.getElementById("reasonRow").style.display = "block";
         }
+        // 如果该 NFC 标签设置了需要备注，显示备注输入框
+        if (data.requiresNote) {
+            document.getElementById("noteRow").style.display = "block";
+        }
 
         // 若设备已绑定工号,预填并锁定输入框(一台手机只能给一个工号打卡)
         const userCodeInput = document.getElementById("userCode");
@@ -306,12 +315,16 @@ function tryEnableSubmit() {
     const reasonRow = document.getElementById("reasonRow");
     const reasonRequired = reasonRow.style.display !== "none";
     const reason = document.getElementById("reasonInput").value.trim();
+    const noteRow = document.getElementById("noteRow");
+    const noteRequired = noteRow.style.display !== "none";
+    const note = document.getElementById("noteInput").value.trim();
     const btn = document.getElementById("submitBtn");
-    btn.disabled = !(nonce && posOk && userCode && Date.now() < nonceExpiresAt && (!reasonRequired || reason));
+    btn.disabled = !(nonce && posOk && userCode && Date.now() < nonceExpiresAt && (!reasonRequired || reason) && (!noteRequired || note));
 }
 
 document.getElementById("userCode").addEventListener("input", tryEnableSubmit);
 document.getElementById("reasonInput").addEventListener("input", tryEnableSubmit);
+document.getElementById("noteInput").addEventListener("input", tryEnableSubmit);
 
 // ---------- 7. nonce 过期监控(含倒计时显示) ----------
 function startNonceWatcher() {
@@ -359,6 +372,7 @@ document.getElementById("submitBtn").addEventListener("click", async () => {
                 userCode: document.getElementById("userCode").value.trim(),
                 lat: nowLat, lng: nowLng,
                 reason: document.getElementById("reasonInput").value.trim(),
+                note: document.getElementById("noteInput").value.trim(),
             }),
         });
         const data = await resp.json();
