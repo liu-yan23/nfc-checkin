@@ -148,11 +148,16 @@ tr:hover{background:#f9fafb;}
                     </div>
                 </div>
                 <div class="stats" id="stats"></div>
+                <div class="btn-row" style="margin-bottom:10px;" id="recordActionsRow">
+                    <button class="outline danger" id="deleteSelectedBtn" style="color:#dc2626;border-color:#fecaca;display:none;">🗑 删除选中记录</button>
+                    <span id="selectedCount" style="font-size:12px;color:#6b7280;line-height:34px;margin-left:8px;"></span>
+                </div>
                 <div class="table-wrap">
                     <table>
                         <thead><tr>
+                            <th style="width:32px;"><input type="checkbox" id="selectAllRecords" title="全选"></th>
                             <th>时间</th><th>姓名</th><th>工号</th><th>科室</th>
-                            <th>类型</th><th>距离</th><th>状态</th><th>定位</th><th>原因</th><th>设备</th>
+                            <th>类型</th><th>距离</th><th>状态</th><th>定位</th><th>原因</th><th>备注</th><th>设备</th>
                         </tr></thead>
                         <tbody id="recordsBody"></tbody>
                     </table>
@@ -203,6 +208,13 @@ tr:hover{background:#f9fafb;}
                         <div class="row">
                             <label>科室</label>
                             <input type="text" id="newNfcDept" placeholder="如 急诊">
+                        </div>
+                        <div class="row" style="align-items:center;">
+                            <label>需要备注</label>
+                            <div style="display:flex;align-items:center;gap:6px;">
+                                <input type="checkbox" id="newNfcRequireNote" style="width:18px;height:18px;">
+                                <span style="font-size:12px;color:#6b7280;">勾选后，用此标签打卡时必须填写备注原因</span>
+                            </div>
                         </div>
                         <button id="addNfcBtn">添加/更新</button>
                     </div>
@@ -464,13 +476,16 @@ async function loadRecords() {
     // 表格
     const body = document.getElementById("recordsBody");
     if (records.length === 0) {
-        body.innerHTML = '<tr><td colspan="10" class="empty">暂无打卡记录</td></tr>';
+        body.innerHTML = '<tr><td colspan="12" class="empty">暂无打卡记录</td></tr>';
+        document.getElementById("deleteSelectedBtn").style.display = "none";
+        document.getElementById("selectedCount").textContent = "";
         return;
     }
     body.innerHTML = "";
     records.forEach(r => {
         const tr = document.createElement("tr");
         const cells = [
+            `<input type="checkbox" class="record-check" value="${r.id}">`,
             formatTime(r.check_time),
             esc(r.user_name),
             esc(r.user_code),
@@ -480,6 +495,7 @@ async function loadRecords() {
             `<span class="tag ${r.status === 'normal' ? 'tag-normal' : 'tag-abnormal'}">${r.status === 'normal' ? '正常' : '补卡'}</span>`,
             r.location_status === 'abnormal' ? '<span class="tag tag-abnormal" style="background:#fef3c7;color:#b45309;">异常</span>' : '<span style="color:#d1d5db;">-</span>',
             r.reason ? esc(r.reason) : '<span style="color:#d1d5db;">-</span>',
+            r.note ? esc(r.note) : '<span style="color:#d1d5db;">-</span>',
             esc(r.device_id).slice(0, 8) + "...",
         ];
         cells.forEach(c => {
@@ -489,9 +505,46 @@ async function loadRecords() {
         });
         body.appendChild(tr);
     });
+    // 绑定复选框事件
+    document.querySelectorAll(".record-check").forEach(cb => cb.addEventListener("change", updateSelectedCount));
+    document.getElementById("selectAllRecords").checked = false;
+    updateSelectedCount();
 }
 
 document.getElementById("searchBtn").addEventListener("click", loadRecords);
+
+// ---------- 打卡记录选择删除 ----------
+function updateSelectedCount() {
+    const checked = document.querySelectorAll(".record-check:checked");
+    const btn = document.getElementById("deleteSelectedBtn");
+    const label = document.getElementById("selectedCount");
+    if (checked.length > 0) {
+        btn.style.display = "inline-block";
+        label.textContent = `已选 ${checked.length} 条`;
+    } else {
+        btn.style.display = "none";
+        label.textContent = "";
+    }
+}
+
+// 全选/取消全选
+document.getElementById("selectAllRecords").addEventListener("change", function() {
+    const checked = this.checked;
+    document.querySelectorAll(".record-check").forEach(cb => cb.checked = checked);
+    updateSelectedCount();
+});
+
+// 删除选中记录
+document.getElementById("deleteSelectedBtn").addEventListener("click", async () => {
+    const checked = document.querySelectorAll(".record-check:checked");
+    if (checked.length === 0) return;
+    const ids = Array.from(checked).map(cb => parseInt(cb.value));
+    if (!confirm(`⚠ 确认删除选中的 ${ids.length} 条打卡记录？\n\n此操作不可恢复，删除后记录将永久消失。`)) return;
+    const { ok, data } = await api("/api/admin/records", { method: "DELETE", body: { ids } });
+    if (!ok) return alert(data.error || "删除失败");
+    alert(`已成功删除 ${data.deleted} 条记录`);
+    loadRecords();
+});
 
 // ---------- 重置数据库(危险操作,清空前自动备份) ----------
 document.getElementById("resetDbBtn").addEventListener("click", async () => {
@@ -666,6 +719,7 @@ async function doExportWithFilter() {
             状态: r.status === "normal" ? "正常" : "补卡",
             定位状态: r.location_status === "abnormal" ? "定位异常" : "正常",
             补卡原因: r.reason || "",
+            备注原因: r.note || "",
             距离米: (r.distance || 0).toFixed(1),
             纬度: r.lat,
             经度: r.lng,
@@ -739,9 +793,16 @@ async function loadWhitelist() {
         nfcTags.forEach(t => {
             const item = document.createElement("div");
             item.className = "list-item";
-            item.innerHTML = `<div><strong>${esc(t.uid)}</strong> → ${esc(t.dept)}</div>
+            var noteBadge = t.requires_note
+                ? '<span class="tag" style="background:#fef3c7;color:#b45309;margin-left:6px;">📝 需备注</span>'
+                : '<span class="tag" style="background:#f3f4f6;color:#9ca3af;margin-left:6px;">无需备注</span>';
+            var toggleBtn = t.requires_note
+                ? `<button class="outline" style="padding:4px 10px;font-size:12px;color:#6b7280;border-color:#d1d5db;" onclick="toggleRequireNote('${esc(t.uid)}', false)">取消备注</button>`
+                : `<button class="outline" style="padding:4px 10px;font-size:12px;color:#b45309;border-color:#fde68a;" onclick="toggleRequireNote('${esc(t.uid)}', true)">设为需备注</button>`;
+            item.innerHTML = `<div><strong>${esc(t.uid)}</strong> → ${esc(t.dept)} ${noteBadge}</div>
                 <div class="list-item-meta">添加于 ${formatTime(t.created_at)}</div>
-                <div style="margin-top:6px;display:flex;gap:6px;">
+                <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+                    ${toggleBtn}
                     <button class="outline" style="padding:4px 10px;font-size:12px;color:#2563eb;border-color:#bfdbfe;" onclick="rotateTag('${esc(t.uid)}','${esc(t.dept)}')">🔄 轮换UID</button>
                     <button class="danger" style="padding:4px 10px;font-size:12px;" onclick="deleteWhitelist('nfc','${esc(t.uid)}')">删除</button>
                 </div>`;
@@ -804,16 +865,31 @@ window.rotateTag = async function (oldUid, dept) {
     loadWhitelist();
 };
 
+// 切换 NFC 标签的"需要备注"设置
+window.toggleRequireNote = async function (uid, requireNote) {
+    var msg = requireNote
+        ? `📝 设为"需要备注"\n\n此后用此标签打卡时，必须填写备注原因。\n\n确定吗？`
+        : `取消"需要备注"\n\n此后用此标签打卡时，不再需要填写备注。\n\n确定吗？`;
+    if (!confirm(msg)) return;
+    const { ok, data } = await api("/api/admin/whitelist", {
+        method: "POST", body: { type: "nfc", uid, dept: "", requires_note: requireNote }
+    });
+    if (!ok) return alert(data.error || "设置失败");
+    loadWhitelist();
+};
+
 document.getElementById("addNfcBtn").addEventListener("click", async () => {
     const uid = document.getElementById("newNfcUid").value.trim();
     const dept = document.getElementById("newNfcDept").value.trim();
+    const requires_note = document.getElementById("newNfcRequireNote").checked;
     if (!uid || !dept) return alert("请填写完整");
     const { ok, data } = await api("/api/admin/whitelist", {
-        method: "POST", body: { type: "nfc", uid, dept }
+        method: "POST", body: { type: "nfc", uid, dept, requires_note }
     });
     if (!ok) return alert(data.error || "添加失败");
     document.getElementById("newNfcUid").value = "";
     document.getElementById("newNfcDept").value = "";
+    document.getElementById("newNfcRequireNote").checked = false;
     loadWhitelist();
 });
 document.getElementById("addUserBtn").addEventListener("click", async () => {
