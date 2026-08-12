@@ -83,7 +83,7 @@ export async function onRequest(context) {
     var tagParam = url.searchParams.get('tag');
     if (!tagParam) return json({ error: '缺少 tag 参数' }, 400);
     var tagUid = String(tagParam).toLowerCase().trim();
-    var tagRow = await env.DB.prepare('SELECT uid, dept FROM nfc_tags WHERE uid = ?').bind(tagUid).first();
+    var tagRow = await env.DB.prepare('SELECT uid, dept, requires_note FROM nfc_tags WHERE uid = ?').bind(tagUid).first();
     if (!tagRow) return json({ error: 'NFC 标签未注册' }, 403);
     var now = Date.now();
     var code = await getSlotCode(tagUid, now, env);
@@ -115,6 +115,7 @@ export async function onRequest(context) {
       if (path === '/api/admin/whitelist' && method === 'POST') return handleUpsertWhitelist(req, env);
       if (path === '/api/admin/whitelist/batch' && method === 'POST') return handleBatchWhitelist(req, env);
       if (path === '/api/admin/whitelist' && method === 'DELETE') return handleDeleteWhitelist(req, env);
+      if (path === '/api/admin/records' && method === 'DELETE') return handleDeleteRecords(req, env);
       if (path === '/api/admin/reset-db' && method === 'POST') return handleResetDb(req, env);
       if (path === '/api/admin/backups' && method === 'GET') return handleListBackups(req, env);
       if (path === '/api/admin/backups/download' && method === 'GET') return handleDownloadBackup(req, env);
@@ -146,9 +147,12 @@ async function initDb(env) {
     'CREATE INDEX IF NOT EXISTS idx_nonces_expires ON nonces(expires_at)',
   ];
   for (var i = 0; i < stmts.length; i++) { await env.DB.exec(stmts[i]).catch(function(){}); }
-  // 已有表向前兼容:自动添加 reason / location_status 字段(若不存在)
+  // 已有表向前兼容:自动添加 reason / location_status / note 字段(若不存在)
   try { await env.DB.prepare('SELECT reason FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN reason TEXT').catch(function(){}); }
   try { await env.DB.prepare('SELECT location_status FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN location_status TEXT').catch(function(){}); }
+  try { await env.DB.prepare('SELECT note FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN note TEXT').catch(function(){}); }
+  // nfc_tags 向前兼容:添加 requires_note 字段(0=不需要备注, 1=需要备注)
+  try { await env.DB.prepare('SELECT requires_note FROM nfc_tags LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE nfc_tags ADD COLUMN requires_note INTEGER DEFAULT 0').catch(function(){}); }
   // 数据备份表(reset 前自动备份用)
   await env.DB.exec('CREATE TABLE IF NOT EXISTS data_backups (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, data_json TEXT NOT NULL)').catch(function(){});
   var now = Date.now();
@@ -222,7 +226,7 @@ async function handleCheckinInit(req, env) {
     await env.DB.prepare('UPDATE device_binds SET tag_uid = ?, last_seen_at = ? WHERE device_id = ?').bind(uid, now, body.deviceId).run();
   }
   // 若设备已绑定工号,返回给前端用于预填(只读)
-  return json({ nonce: nonce, nonceExpiresAt: expires, dept: tag.dept, serverTime: now, boundUserCode: bind ? bind.user_code : null });
+  return json({ nonce: nonce, nonceExpiresAt: expires, dept: tag.dept, serverTime: now, boundUserCode: bind ? bind.user_code : null, requiresNote: tag.requires_note ? true : false });
 }
 
 async function handleCheckinSubmit(req, env) {
@@ -279,8 +283,15 @@ async function handleCheckinSubmit(req, env) {
   }
   var reasonVal = ct.status === 'abnormal' ? String(reason).trim() : null;
 
-  var tag = await env.DB.prepare('SELECT dept FROM nfc_tags WHERE uid = ?').bind(uid).first();
+  var tag = await env.DB.prepare('SELECT dept, requires_note FROM nfc_tags WHERE uid = ?').bind(uid).first();
   if (!tag) return json({ error: 'NFC 标签已失效' }, 403);
+
+  // 应急打卡备注:如果该 NFC 标签设置了 requires_note,打卡时必须填写备注
+  var note = body.note ? String(body.note).trim() : '';
+  if (tag.requires_note) {
+    if (!note) return json({ error: '此打卡点需要填写备注原因（如：参加出科考核等），请填写后再提交' }, 400);
+    if (note.length > 100) return json({ error: '备注不超过 100 字' }, 400);
+  }
   var pos = await env.DB.prepare('SELECT lat, lng, radius FROM dept_positions WHERE dept = ?').bind(tag.dept).first();
   if (!pos) return json({ error: '科室「' + tag.dept + '」未配置坐标' }, 500);
 
@@ -305,12 +316,13 @@ async function handleCheckinSubmit(req, env) {
   }
   var locStatus = locationAbnormal ? 'abnormal' : 'normal';
 
-  var stmt = env.DB.prepare('INSERT INTO checkins (tag_uid, user_code, user_name, dept, check_type, status, check_time, lat, lng, distance, device_id, ip, ua, created_at, checkin_date, reason, location_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uid, u, user.name, tag.dept, ct.type, ct.status, now, lat, lng, dis, d, ip, ua, now, cdate, reasonVal, locStatus);
+  var noteVal = note ? note : null;
+  var stmt = env.DB.prepare('INSERT INTO checkins (tag_uid, user_code, user_name, dept, check_type, status, check_time, lat, lng, distance, device_id, ip, ua, created_at, checkin_date, reason, location_status, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uid, u, user.name, tag.dept, ct.type, ct.status, now, lat, lng, dis, d, ip, ua, now, cdate, reasonVal, locStatus, noteVal);
   try { await stmt.run(); } catch (e) { if (String(e.message).indexOf('UNIQUE') >= 0) return json({ error: '今日该卡类型已打卡' }, 409); throw e; }
 
   await env.DB.prepare('UPDATE nonces SET used = 1 WHERE nonce = ?').bind(n).run();
   await env.DB.prepare('UPDATE device_binds SET user_code = ?, last_seen_at = ? WHERE device_id = ?').bind(u, now, d).run();
-  await audit(env, 'checkin_ok', user.name + '(' + u + ') 打卡: ' + tag.dept + ' - ' + ct.type + (ct.status === 'abnormal' ? '(补卡:' + reasonVal + ')' : '') + ', 距离 ' + dis.toFixed(1) + 'm' + (locationAbnormal ? '[定位异常]' : ''), d, ip);
+  await audit(env, 'checkin_ok', user.name + '(' + u + ') 打卡: ' + tag.dept + ' - ' + ct.type + (ct.status === 'abnormal' ? '(补卡:' + reasonVal + ')' : '') + ', 距离 ' + dis.toFixed(1) + 'm' + (locationAbnormal ? '[定位异常]' : '') + (noteVal ? '[备注:' + noteVal + ']' : ''), d, ip);
 
   return json({ ok: true, record: { userName: user.name, userCode: u, dept: tag.dept, checkType: ct.type, checkTime: now, distance: dis.toFixed(1), status: ct.status, reason: reasonVal, locationStatus: locStatus } });
 }
@@ -341,6 +353,23 @@ async function handleAllRecords(req, env) {
   return json({ records: rows.results || [] });
 }
 
+// 选择性删除打卡记录
+// 入参: { ids: [1, 2, 3] }
+async function handleDeleteRecords(req, env) {
+  var body = await req.json();
+  if (!Array.isArray(body.ids) || body.ids.length === 0) return json({ error: '缺少 ids 参数' }, 400);
+  if (body.ids.length > 500) return json({ error: '单次最多删除 500 条' }, 400);
+  var deleted = 0;
+  for (var i = 0; i < body.ids.length; i++) {
+    var id = parseInt(body.ids[i]);
+    if (isNaN(id) || id <= 0) continue;
+    var r = await env.DB.prepare('DELETE FROM checkins WHERE id = ?').bind(id).run();
+    if (r.meta && r.meta.changes > 0) deleted++;
+  }
+  await audit(env, 'records_delete', '管理员删除 ' + deleted + ' 条打卡记录 (IDs: ' + body.ids.join(',') + ')', null, getIp(req));
+  return json({ ok: true, deleted: deleted });
+}
+
 async function handleUnbind(req, env) {
   var body = await req.json();
   if (!body.deviceId) return json({ error: '缺少 deviceId' }, 400);
@@ -350,7 +379,7 @@ async function handleUnbind(req, env) {
 }
 
 async function handleGetWhitelist(req, env) {
-  var tags = await env.DB.prepare('SELECT uid, dept, created_at FROM nfc_tags ORDER BY dept').all();
+  var tags = await env.DB.prepare('SELECT uid, dept, created_at, requires_note FROM nfc_tags ORDER BY dept').all();
   var users = await env.DB.prepare('SELECT user_code, name, created_at FROM users ORDER BY user_code').all();
   var depts = await env.DB.prepare('SELECT dept, lat, lng, radius FROM dept_positions ORDER BY dept').all();
   return json({ nfcTags: tags.results || [], users: users.results || [], depts: depts.results || [] });
@@ -359,8 +388,16 @@ async function handleGetWhitelist(req, env) {
 async function handleUpsertWhitelist(req, env) {
   var body = await req.json(), now = Date.now();
   if (body.type === 'nfc') {
-    if (!body.uid || !body.dept) return json({ error: '参数缺失' }, 400);
-    await env.DB.prepare('INSERT INTO nfc_tags (uid, dept, created_at) VALUES (?, ?, ?) ON CONFLICT(uid) DO UPDATE SET dept = excluded.dept').bind(String(body.uid).toLowerCase().trim(), body.dept, now).run();
+    if (!body.uid) return json({ error: '参数缺失' }, 400);
+    var rn = body.requires_note ? 1 : 0;
+    var uidVal = String(body.uid).toLowerCase().trim();
+    // 如果传了 dept 就同时更新科室，否则只更新 requires_note
+    if (body.dept) {
+      await env.DB.prepare('INSERT INTO nfc_tags (uid, dept, created_at, requires_note) VALUES (?, ?, ?, ?) ON CONFLICT(uid) DO UPDATE SET dept = excluded.dept, requires_note = excluded.requires_note').bind(uidVal, body.dept, now, rn).run();
+    } else {
+      // 仅更新 requires_note（不修改科室名）
+      await env.DB.prepare('UPDATE nfc_tags SET requires_note = ? WHERE uid = ?').bind(rn, uidVal).run();
+    }
   } else if (body.type === 'user') {
     if (!body.userCode || !body.name) return json({ error: '参数缺失' }, 400);
     await env.DB.prepare('INSERT INTO users (user_code, name, created_at) VALUES (?, ?, ?) ON CONFLICT(user_code) DO UPDATE SET name = excluded.name').bind(body.userCode, body.name, now).run();
