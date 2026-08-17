@@ -150,6 +150,7 @@ tr:hover{background:#f9fafb;}
                 <div class="stats" id="stats"></div>
                 <div class="btn-row" style="margin-bottom:10px;" id="recordActionsRow">
                     <button class="outline danger" id="deleteSelectedBtn" style="color:#dc2626;border-color:#fecaca;display:none;">🗑 删除选中记录</button>
+                    <button class="outline" id="manualCheckinBtn" style="color:#2563eb;border-color:#bfdbfe;">✏️ 管理员代打卡</button>
                     <span id="selectedCount" style="font-size:12px;color:#6b7280;line-height:34px;margin-left:8px;"></span>
                 </div>
                 <div class="table-wrap">
@@ -364,6 +365,62 @@ tr:hover{background:#f9fafb;}
   </div>
 </div>
 
+<!-- ========== 管理员代打卡弹窗 ========== -->
+<div id="manualCheckinModal" style="display:none;">
+  <div class="modal-mask" onclick="if(event.target===this)closeManualCheckin()">
+    <div class="modal-box">
+      <div class="modal-head">
+        <div class="modal-title">✏️ 管理员代打卡</div>
+        <button class="modal-close" onclick="closeManualCheckin()">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-grid">
+          <div>
+            <label>学生工号 <span style="color:#dc2626;">*</span></label>
+            <input type="text" id="mcUserCode" placeholder="输入工号" autocomplete="off">
+          </div>
+          <div>
+            <label>学生姓名</label>
+            <input type="text" id="mcUserName" readonly style="background:#f9fafb;color:#6b7280;" placeholder="自动填充">
+          </div>
+          <div>
+            <label>科室 <span style="color:#dc2626;">*</span></label>
+            <select id="mcDept"><option value="">请选择科室</option></select>
+          </div>
+          <div>
+            <label>打卡类型 <span style="color:#dc2626;">*</span></label>
+            <select id="mcCheckType">
+              <option value="">请选择类型</option>
+              <option value="上午上班">上午上班</option>
+              <option value="上午下班">上午下班</option>
+              <option value="下午上班">下午上班</option>
+              <option value="下午下班">下午下班</option>
+              <option value="夜班">夜班</option>
+            </select>
+          </div>
+          <div>
+            <label>打卡日期 <span style="color:#dc2626;">*</span></label>
+            <input type="date" id="mcDate">
+          </div>
+          <div class="full">
+            <label>代打原因 <span style="color:#dc2626;">*</span>（必填，不超过100字）</label>
+            <textarea id="mcReason" rows="3" placeholder="如：手机故障无法打卡 / 请假 / 参加出科考核等" maxlength="100" style="width:100%;border:1px solid #e5e7eb;border-radius:6px;padding:8px;font-size:14px;resize:vertical;"></textarea>
+          </div>
+          <div class="full">
+            <div class="export-preview" id="mcPreview" style="background:#eff6ff;color:#1e40af;">
+              ✏️ 请填写完整信息后提交代打卡
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="outline" onclick="closeManualCheckin()">取消</button>
+        <button id="confirmManualCheckinBtn" onclick="submitManualCheckin()" disabled>✏️ 确认代打卡</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 // =====================【部署配置】=====================
 // 前后端部署在同一 Cloudflare Pages 域名下，使用相对路径即可
@@ -495,7 +552,7 @@ async function loadRecords() {
             `<span class="tag ${r.status === 'normal' ? 'tag-normal' : 'tag-abnormal'}">${r.status === 'normal' ? '正常' : '补卡'}</span>`,
             r.location_status === 'abnormal' ? '<span class="tag tag-abnormal" style="background:#fef3c7;color:#b45309;">异常</span>' : '<span style="color:#d1d5db;">-</span>',
             r.reason ? esc(r.reason) : '<span style="color:#d1d5db;">-</span>',
-            r.note ? esc(r.note) : '<span style="color:#d1d5db;">-</span>',
+            r.note === '管理员代打卡' ? '<span class="tag" style="background:#dbeafe;color:#1e40af;">' + esc(r.note) + '</span>' : (r.note ? esc(r.note) : '<span style="color:#d1d5db;">-</span>'),
             esc(r.device_id).slice(0, 8) + "...",
         ];
         cells.forEach(c => {
@@ -512,6 +569,82 @@ async function loadRecords() {
 }
 
 document.getElementById("searchBtn").addEventListener("click", loadRecords);
+
+// ---------- 管理员代打卡 ----------
+var mcUsers = []; // 缓存白名单学生列表
+
+function openManualCheckin() {
+    // 默认日期=今天
+    var today = new Date(Date.now() + 8 * 3600 * 1000);
+    document.getElementById("mcDate").value = today.getUTCFullYear() + '-' + String(today.getUTCMonth() + 1).padStart(2, '0') + '-' + String(today.getUTCDate()).padStart(2, '0');
+    // 清空表单
+    document.getElementById("mcUserCode").value = "";
+    document.getElementById("mcUserName").value = "";
+    document.getElementById("mcCheckType").value = "";
+    document.getElementById("mcReason").value = "";
+    updateMcPreview();
+    document.getElementById("manualCheckinModal").style.display = "block";
+}
+
+function closeManualCheckin() {
+    document.getElementById("manualCheckinModal").style.display = "none";
+}
+
+// 工号输入时自动匹配学生姓名
+document.getElementById("mcUserCode").addEventListener("input", function() {
+    var code = this.value.trim();
+    var found = mcUsers.find(function(u) { return u.user_code === code; });
+    document.getElementById("mcUserName").value = found ? found.name : "";
+    updateMcPreview();
+});
+
+["mcDept", "mcCheckType", "mcDate", "mcReason"].forEach(function(id) {
+    document.getElementById(id).addEventListener("input", updateMcPreview);
+    document.getElementById(id).addEventListener("change", updateMcPreview);
+});
+
+function updateMcPreview() {
+    var code = document.getElementById("mcUserCode").value.trim();
+    var name = document.getElementById("mcUserName").value;
+    var dept = document.getElementById("mcDept").value;
+    var type = document.getElementById("mcCheckType").value;
+    var date = document.getElementById("mcDate").value;
+    var reason = document.getElementById("mcReason").value.trim();
+    var btn = document.getElementById("confirmManualCheckinBtn");
+    var preview = document.getElementById("mcPreview");
+    if (code && name && dept && type && date && reason) {
+        btn.disabled = false;
+        preview.innerHTML = "✏️ 将为 <strong>" + name + "(" + code + ")</strong> 在 <strong>" + date + "</strong> 创建 <strong>" + dept + " - " + type + "</strong> 代打卡记录";
+        preview.style.background = "#dbeafe";
+        preview.style.color = "#1e40af";
+    } else {
+        btn.disabled = true;
+        preview.innerHTML = "✏️ 请填写完整信息后提交代打卡";
+        preview.style.background = "#eff6ff";
+        preview.style.color = "#1e40af";
+    }
+}
+
+async function submitManualCheckin() {
+    var code = document.getElementById("mcUserCode").value.trim();
+    var name = document.getElementById("mcUserName").value;
+    var dept = document.getElementById("mcDept").value;
+    var type = document.getElementById("mcCheckType").value;
+    var date = document.getElementById("mcDate").value;
+    var reason = document.getElementById("mcReason").value.trim();
+    if (!code || !name || !dept || !type || !date || !reason) return alert("请填写完整信息");
+    if (!confirm("确认代打卡？\n\n学生：" + name + "(" + code + ")\n科室：" + dept + "\n类型：" + type + "\n日期：" + date + "\n原因：" + reason)) return;
+    var { ok, data } = await api("/api/admin/manual-checkin", {
+        method: "POST",
+        body: { userCode: code, dept: dept, checkType: type, checkinDate: date, reason: reason }
+    });
+    if (!ok) return alert(data.error || "代打卡失败");
+    alert("代打卡成功！\n" + name + " " + date + " " + dept + " - " + type);
+    closeManualCheckin();
+    loadRecords();
+}
+
+document.getElementById("manualCheckinBtn").addEventListener("click", openManualCheckin);
 
 // ---------- 打卡记录选择删除 ----------
 function updateSelectedCount() {
@@ -847,6 +980,15 @@ async function loadWhitelist() {
             deptEl.appendChild(item);
         });
     }
+    // 同步代打卡弹窗的科室下拉和学生列表
+    mcUsers = users;
+    var mcDept = document.getElementById("mcDept");
+    mcDept.innerHTML = '<option value="">请选择科室</option>';
+    depts.forEach(function(d) {
+        var opt = document.createElement("option");
+        opt.value = d.dept; opt.textContent = d.dept;
+        mcDept.appendChild(opt);
+    });
 }
 window.deleteWhitelist = async function (type, key) {
     if (!confirm(`确认删除 ${type}：${key}？`)) return;
