@@ -423,13 +423,20 @@ async function loadMyRecords() {
             item.appendChild(time);
 
             const meta = document.createElement("div");
-            meta.textContent = `${r.dept} · ${r.check_type} · 距离 ${r.distance.toFixed(1)}m`;
+            var distText = r.note === '管理员代打卡' ? '管理员代打卡' : `距离 ${r.distance.toFixed(1)}m`;
+            meta.textContent = `${r.dept} · ${r.check_type} · ${distText}`;
             meta.style.color = "#6b7280";
             item.appendChild(meta);
 
             const tag = document.createElement("span");
-            tag.className = "tag " + (r.status === "normal" ? "tag-normal" : "tag-abnormal");
-            tag.textContent = r.status === "normal" ? "正常" : "异常";
+            if (r.note === '管理员代打卡') {
+                tag.className = "tag";
+                tag.style.cssText = "background:#dbeafe;color:#1e40af;";
+                tag.textContent = "管理员代打卡";
+            } else {
+                tag.className = "tag " + (r.status === "normal" ? "tag-normal" : "tag-abnormal");
+                tag.textContent = r.status === "normal" ? "正常" : "异常";
+            }
             item.appendChild(tag);
 
             list.appendChild(item);
