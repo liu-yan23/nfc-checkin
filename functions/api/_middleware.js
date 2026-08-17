@@ -120,6 +120,7 @@ export async function onRequest(context) {
       if (path === '/api/admin/whitelist/batch' && method === 'POST') return handleBatchWhitelist(req, env);
       if (path === '/api/admin/whitelist' && method === 'DELETE') return handleDeleteWhitelist(req, env);
       if (path === '/api/admin/records' && method === 'DELETE') return handleDeleteRecords(req, env);
+      if (path === '/api/admin/manual-checkin' && method === 'POST') return handleManualCheckin(req, env);
       if (path === '/api/admin/reset-db' && method === 'POST') return handleResetDb(req, env);
       if (path === '/api/admin/backups' && method === 'GET') return handleListBackups(req, env);
       if (path === '/api/admin/backups/download' && method === 'GET') return handleDownloadBackup(req, env);
@@ -372,6 +373,48 @@ async function handleDeleteRecords(req, env) {
   }
   await audit(env, 'records_delete', '管理员删除 ' + deleted + ' 条打卡记录 (IDs: ' + body.ids.join(',') + ')', null, getIp(req));
   return json({ ok: true, deleted: deleted });
+}
+
+// 管理员代打卡
+async function handleManualCheckin(req, env) {
+  var body = await req.json();
+  var u = String(body.userCode || '').trim();
+  var dept = String(body.dept || '').trim();
+  var checkType = String(body.checkType || '').trim();
+  var checkinDate = String(body.checkinDate || '').trim();
+  var reason = String(body.reason || '').trim();
+  if (!u || !dept || !checkType || !checkinDate || !reason) return json({ error: '参数缺失: 工号/科室/类型/日期/原因 均为必填' }, 400);
+  if (reason.length > 100) return json({ error: '代打原因不超过 100 字' }, 400);
+
+  // 验证学生存在
+  var user = await env.DB.prepare('SELECT name FROM users WHERE user_code = ?').bind(u).first();
+  if (!user) return json({ error: '工号 ' + u + ' 不在白名单中' }, 404);
+
+  // 验证打卡类型
+  var validTypes = ['上午上班', '上午下班', '下午上班', '下午下班', '夜班'];
+  if (validTypes.indexOf(checkType) < 0) return json({ error: '无效的打卡类型' }, 400);
+
+  // 验证日期格式 YYYY-MM-DD
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(checkinDate)) return json({ error: '日期格式应为 YYYY-MM-DD' }, 400);
+
+  // 检查是否已有该类型打卡记录(UNIQUE约束)
+  var exist = await env.DB.prepare('SELECT id FROM checkins WHERE user_code = ? AND checkin_date = ? AND check_type = ?').bind(u, checkinDate, checkType).first();
+  if (exist) return json({ error: '该学生 ' + checkinDate + ' 已有「' + checkType + '」打卡记录，不可重复添加' }, 409);
+
+  // 构造打卡时间戳:根据打卡类型设定默认时间
+  var defaultHourMap = { '上午上班': 7, '上午下班': 12, '下午上班': 13, '下午下班': 17, '夜班': 21 };
+  var parts = checkinDate.split('-');
+  var checkTime = Date.UTC(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]), defaultHourMap[checkType], 30, 0);
+
+  var ip = getIp(req);
+  var now = Date.now();
+  var noteVal = '管理员代打卡';
+
+  var stmt = env.DB.prepare('INSERT INTO checkins (tag_uid, user_code, user_name, dept, check_type, status, check_time, lat, lng, distance, device_id, ip, ua, created_at, checkin_date, reason, location_status, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind('ADMIN_MANUAL', u, user.name, dept, checkType, 'normal', checkTime, 0, 0, 0, 'admin_manual', ip, 'admin', now, checkinDate, reason, 'normal', noteVal);
+  try { await stmt.run(); } catch (e) { if (String(e.message).indexOf('UNIQUE') >= 0) return json({ error: '今日该卡类型已打卡' }, 409); throw e; }
+
+  await audit(env, 'manual_checkin', '管理员代打卡: ' + user.name + '(' + u + ') ' + dept + ' - ' + checkType + ' 日期:' + checkinDate + ' 原因:' + reason, null, ip);
+  return json({ ok: true, record: { userName: user.name, userCode: u, dept: dept, checkType: checkType, checkTime: checkTime, checkinDate: checkinDate, reason: reason, note: noteVal } });
 }
 
 async function handleUnbind(req, env) {
