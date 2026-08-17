@@ -337,9 +337,9 @@ async function handleMyRecords(req, env) {
   if (!deviceId) return json({ error: '缺少 deviceId' }, 400);
   var bind = await env.DB.prepare('SELECT tag_uid, user_code FROM device_binds WHERE device_id = ?').bind(deviceId).first();
   if (!bind) return json({ records: [] });
-  // 按 device_id 查询该设备对应工号的记录,而非按 tag_uid 查询所有记录
+  // 按 user_code 查询该学生的所有记录(包括管理员代打卡),而非仅按 device_id 查询
   if (bind.user_code) {
-    var rows = await env.DB.prepare('SELECT check_time, dept, check_type, status, distance FROM checkins WHERE device_id = ? ORDER BY check_time DESC LIMIT 30').bind(deviceId).all();
+    var rows = await env.DB.prepare('SELECT check_time, dept, check_type, status, distance, note FROM checkins WHERE user_code = ? ORDER BY check_time DESC LIMIT 30').bind(bind.user_code).all();
     return json({ boundUid: bind.tag_uid, boundUserCode: bind.user_code, records: rows.results || [] });
   }
   return json({ boundUid: bind.tag_uid, boundUserCode: null, records: [] });
