@@ -273,6 +273,7 @@ tr:hover{background:#f9fafb;}
             <div id="tab-audit" class="tab-content" style="display:none;">
                 <div class="btn-row" style="margin-bottom:10px;">
                     <button class="outline" id="refreshAuditBtn">刷新</button>
+                    <button class="outline danger" id="clearAuditBtn" style="color:#dc2626;border-color:#fecaca;">🧹 清理旧日志</button>
                 </div>
                 <div class="table-wrap">
                     <table>
@@ -1084,6 +1085,19 @@ async function loadAudit() {
     });
 }
 document.getElementById("refreshAuditBtn").addEventListener("click", loadAudit);
+
+// 清理旧审计日志
+document.getElementById("clearAuditBtn").addEventListener("click", async () => {
+    var input = prompt("请输入要保留的天数（删除更早的日志）：\n\n建议输入 90（保留最近90天）", "90");
+    if (input === null) return;
+    var days = parseInt(input);
+    if (isNaN(days) || days < 1) return alert("请输入有效的天数");
+    if (!confirm("确认清理 " + days + " 天之前的审计日志？\n\n此操作不可恢复。")) return;
+    const { ok, data } = await api("/api/admin/clear-audit", { method: "POST", body: { days } });
+    if (!ok) return alert(data.error || "清理失败");
+    alert(data.message);
+    loadAudit();
+});
 
 // ---------- 批量导入白名单 ----------
 function downloadTemplate(type) {
