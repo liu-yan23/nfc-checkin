@@ -94,9 +94,8 @@ export async function onRequest(context) {
   // 数据库懒初始化
   try { await env.DB.prepare('SELECT 1 FROM checkins LIMIT 1').run(); } catch (e) { await initDb(env); }
 
-  // 向前兼容迁移：确保新字段存在（initDb 只在表不存在时运行，所以单独检查）
-  try { await env.DB.prepare('SELECT requires_note FROM nfc_tags LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE nfc_tags ADD COLUMN requires_note INTEGER DEFAULT 0').catch(function(){}); }
-  try { await env.DB.prepare('SELECT note FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN note TEXT').catch(function(){}); }
+  // 向前兼容迁移：确保新字段存在（每个 Worker 隔离实例只执行一次）
+  await migrateDb(env);
 
   try {
     // 公开接口
@@ -122,6 +121,7 @@ export async function onRequest(context) {
       if (path === '/api/admin/records' && method === 'DELETE') return handleDeleteRecords(req, env);
       if (path === '/api/admin/manual-checkin' && method === 'POST') return handleManualCheckin(req, env);
       if (path === '/api/admin/reset-db' && method === 'POST') return handleResetDb(req, env);
+      if (path === '/api/admin/clear-audit' && method === 'POST') return handleClearAudit(req, env);
       if (path === '/api/admin/backups' && method === 'GET') return handleListBackups(req, env);
       if (path === '/api/admin/backups/download' && method === 'GET') return handleDownloadBackup(req, env);
       if (path === '/api/admin/rotate-tag' && method === 'POST') return handleRotateTag(req, env);
@@ -136,6 +136,17 @@ export async function onRequest(context) {
 }
 
 // ============== 数据库初始化 ==============
+var _migrated = false; // Worker 隔离实例级缓存：迁移只执行一次
+
+async function migrateDb(env) {
+  if (_migrated) return;
+  try { await env.DB.prepare('SELECT reason FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN reason TEXT').catch(function(){}); }
+  try { await env.DB.prepare('SELECT location_status FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN location_status TEXT').catch(function(){}); }
+  try { await env.DB.prepare('SELECT note FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN note TEXT').catch(function(){}); }
+  try { await env.DB.prepare('SELECT requires_note FROM nfc_tags LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE nfc_tags ADD COLUMN requires_note INTEGER DEFAULT 0').catch(function(){}); }
+  _migrated = true;
+}
+
 async function initDb(env) {
   var stmts = [
     'CREATE TABLE IF NOT EXISTS nfc_tags (uid TEXT PRIMARY KEY, dept TEXT NOT NULL, created_at INTEGER NOT NULL)',
@@ -152,18 +163,8 @@ async function initDb(env) {
     'CREATE INDEX IF NOT EXISTS idx_nonces_expires ON nonces(expires_at)',
   ];
   for (var i = 0; i < stmts.length; i++) { await env.DB.exec(stmts[i]).catch(function(){}); }
-  // 已有表向前兼容:自动添加 reason / location_status / note 字段(若不存在)
-  try { await env.DB.prepare('SELECT reason FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN reason TEXT').catch(function(){}); }
-  try { await env.DB.prepare('SELECT location_status FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN location_status TEXT').catch(function(){}); }
-  try { await env.DB.prepare('SELECT note FROM checkins LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE checkins ADD COLUMN note TEXT').catch(function(){}); }
-  // nfc_tags 向前兼容:添加 requires_note 字段(0=不需要备注, 1=需要备注)
-  try { await env.DB.prepare('SELECT requires_note FROM nfc_tags LIMIT 1').run(); } catch (e) { await env.DB.exec('ALTER TABLE nfc_tags ADD COLUMN requires_note INTEGER DEFAULT 0').catch(function(){}); }
   // 数据备份表(reset 前自动备份用)
   await env.DB.exec('CREATE TABLE IF NOT EXISTS data_backups (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, data_json TEXT NOT NULL)').catch(function(){});
-  var now = Date.now();
-  await env.DB.prepare("INSERT OR IGNORE INTO nfc_tags (uid, dept, created_at) VALUES ('538b1cce330001', '急诊', ?), ('04b771cc223311', '护士站', ?)").bind(now, now).run();
-  await env.DB.prepare("INSERT OR IGNORE INTO users (user_code, name, created_at) VALUES ('001', '刘六六', ?), ('002', '李四', ?)").bind(now, now).run();
-  await env.DB.prepare("INSERT OR IGNORE INTO dept_positions (dept, lat, lng, radius) VALUES ('急诊', 29.362, 106.2929, 15), ('护士站', 29.4570, 106.5895, 15)").run();
 }
 
 async function audit(env, event, detail, deviceId, ip) {
@@ -322,10 +323,14 @@ async function handleCheckinSubmit(req, env) {
   var locStatus = locationAbnormal ? 'abnormal' : 'normal';
 
   var noteVal = note ? note : null;
+
+  // 先标记 nonce 已使用，再插入记录
+  // 这样即使插入失败，nonce 也不会被重复利用（最坏情况是浪费一次 nonce，而非重复打卡）
+  await env.DB.prepare('UPDATE nonces SET used = 1 WHERE nonce = ?').bind(n).run();
+
   var stmt = env.DB.prepare('INSERT INTO checkins (tag_uid, user_code, user_name, dept, check_type, status, check_time, lat, lng, distance, device_id, ip, ua, created_at, checkin_date, reason, location_status, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uid, u, user.name, tag.dept, ct.type, ct.status, now, lat, lng, dis, d, ip, ua, now, cdate, reasonVal, locStatus, noteVal);
   try { await stmt.run(); } catch (e) { if (String(e.message).indexOf('UNIQUE') >= 0) return json({ error: '今日该卡类型已打卡' }, 409); throw e; }
 
-  await env.DB.prepare('UPDATE nonces SET used = 1 WHERE nonce = ?').bind(n).run();
   await env.DB.prepare('UPDATE device_binds SET user_code = ?, last_seen_at = ? WHERE device_id = ?').bind(u, now, d).run();
   await audit(env, 'checkin_ok', user.name + '(' + u + ') 打卡: ' + tag.dept + ' - ' + ct.type + (ct.status === 'abnormal' ? '(补卡:' + reasonVal + ')' : '') + ', 距离 ' + dis.toFixed(1) + 'm' + (locationAbnormal ? '[定位异常]' : '') + (noteVal ? '[备注:' + noteVal + ']' : ''), d, ip);
 
@@ -551,6 +556,23 @@ async function handleResetDb(req, env) {
   await env.DB.exec('CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT NOT NULL, detail TEXT, device_id TEXT, ip TEXT, created_at INTEGER NOT NULL)').catch(function(){});
   await env.DB.prepare('INSERT INTO audit_logs (event, detail, device_id, ip, created_at) VALUES (?, ?, ?, ?, ?)').bind('db_reset', '管理员重置数据库,备份ID=' + backupId + ',已清空打卡/设备/会话数据,保留白名单', null, getIp(req), Date.now()).run();
   return json({ ok: true, backupId: backupId, message: '数据库已重置。清空前已自动备份(备份ID: ' + backupId + ')。打卡记录、设备绑定、nonce、管理员会话已清空,白名单已保留。当前管理员会话已失效,请重新登录。' });
+}
+
+// 清理审计日志：保留最近 N 天，删除更早的
+async function handleClearAudit(req, env) {
+  var body = await req.json().catch(function() { return {}; });
+  var days = parseInt(body.days) || 90; // 默认保留 90 天
+  if (days < 1) days = 90;
+  var cutoff = Date.now() - days * 86400000;
+  // 先统计要删除多少条
+  var cnt = await env.DB.prepare('SELECT COUNT(*) as cnt FROM audit_logs WHERE created_at < ?').bind(cutoff).first();
+  var willDelete = cnt ? cnt.cnt : 0;
+  if (willDelete === 0) return json({ ok: true, deleted: 0, message: '没有需要清理的审计日志（最近 ' + days + ' 天内的记录均保留）' });
+  // 删除旧日志
+  await env.DB.prepare('DELETE FROM audit_logs WHERE created_at < ?').bind(cutoff).run();
+  // 记录本次清理操作
+  await env.DB.prepare('INSERT INTO audit_logs (event, detail, device_id, ip, created_at) VALUES (?, ?, ?, ?, ?)').bind('audit_clear', '清理 ' + willDelete + ' 条审计日志(保留最近' + days + '天)', null, getIp(req), Date.now()).run();
+  return json({ ok: true, deleted: willDelete, message: '已清理 ' + willDelete + ' 条审计日志，保留最近 ' + days + ' 天的记录' });
 }
 
 // 查看备份列表
